@@ -1,11 +1,13 @@
 package main;  
 
 import (
+	"log"
 	"github.com/pheriksson/K8_P2P_FAILOVER_POC/agent"
 )
 
 func main(){
-	n := agent.InitNetwork("127.0.0.1",8080);
+	log.Println("Starting app")
+	n := agent.InitNetwork("0.0.0.0",9999);
 	n.Listen();
 }
 
