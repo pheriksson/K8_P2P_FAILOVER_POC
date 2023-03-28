@@ -2,6 +2,7 @@ package agent;
 
 import (
 	"log"
+	"fmt"
 	"net"
 )
 
@@ -16,6 +17,7 @@ func InitNetwork(ip string, port int) *Network{
 }
 
 func (n *Network) Listen(){
+	fmt.Println("listening on port...")
 	conn, err := net.ListenUDP("udp", n.addr);
 	if err != nil {
 		log.Panic("CANNOT BIND TO ADDR:", n.addr);

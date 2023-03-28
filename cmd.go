@@ -2,7 +2,7 @@ package main;
 
 import (
 	"log"
-	"github.com/pheriksson/K8_P2P_FAILOVER_POC/agent"
+	"github.com/pheriksson/K8_P2P_FAILOVER_POC/agent/network"
 )
 
 func main(){
