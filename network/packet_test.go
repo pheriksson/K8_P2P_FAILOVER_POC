@@ -8,7 +8,7 @@ import (
 )
 
 func TestPacketTimestampFormat(t *testing.T){
-	testPacket := NewPacket([]byte{1})
+	testPacket := NewPacket(&net.UDPAddr{},[]byte{})
 	timeStamp, err := GetTimeStamp(testPacket)
 	if err != nil{
 		t.Errorf("Could not get valid format for packet timestamp: %s", err)

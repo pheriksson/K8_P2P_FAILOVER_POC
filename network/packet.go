@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// Make function to check that two packets are equal in values. .
-
-const PACKET_TIMESTAMP_FORMAT = "yyyy-mm-dd HH:mm:ss" 
+const PACKET_TIMESTAMP_FORMAT = "2006-01-02 15:04:05" 
 
 type Packet struct {
 	Caller *net.UDPAddr
@@ -22,6 +20,7 @@ func NewPacket(c *net.UDPAddr, data []byte) *Packet{
 	p := Packet{Caller: c, TimeStamp: time.Now().Format(PACKET_TIMESTAMP_FORMAT), Data: data}
 	return &p
 }
+
 
 
 func GetTimeStamp(p *Packet) (time.Time, error){
