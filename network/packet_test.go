@@ -1,15 +1,28 @@
-package agent
+package network
 
 import (
-	"net"
 	"bytes"
+	"net"
 	"testing"
+	"time"
 )
+
+func TestPacketTimestampFormat(t *testing.T){
+	testPacket := NewPacket([]byte{1})
+	timeStamp, err := GetTimeStamp(testPacket)
+	if err != nil{
+		t.Errorf("Could not get valid format for packet timestamp: %s", err)
+	}
+	if (testPacket.TimeStamp != timeStamp.Format(PACKET_TIMESTAMP_FORMAT)){
+		t.Errorf("Invalid time formatting for packets")
+	}
+}
+
 
 func TestEncodeDecode(t *testing.T){
 	// Init packet attributes.
 	wantAddr := &net.UDPAddr{}
-	wantTime := []byte{1}
+	wantTime := time.Now().String() 
 	wantData := []byte{2}
 
 	// Init packet object.
@@ -28,11 +41,9 @@ func TestEncodeDecode(t *testing.T){
 	if !bytes.Equal(decodePacket.Data, wantData){
 		t.Errorf("\nWANTED: %b \nGOT: %b", wantData, decodePacket.Data)
 	}
-	
-	if !bytes.Equal(decodePacket.Time, wantTime){
-		t.Errorf("\nWANTED: %b \nGOT: %b", wantTime, decodePacket.Time)
-	}
-	
+	if !(decodePacket.TimeStamp == wantTime){
+		t.Errorf("\nWANTED: %s \nGOT: %s", wantTime, decodePacket.TimeStamp)
+	}	
 }
 
 

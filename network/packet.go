@@ -1,17 +1,38 @@
-package agent
+package network
 
 import (
 	"bytes"
-	"log"
 	"encoding/gob"
+	"log"
 	"net"
+	"time"
 )
+
+// Make function to check that two packets are equal in values. .
+
+const PACKET_TIMESTAMP_FORMAT = "yyyy-mm-dd HH:mm:ss" 
 
 type Packet struct {
 	Caller *net.UDPAddr
-	Time   []byte
+	TimeStamp string 
 	Data   []byte
 }
+
+func NewPacket(c *net.UDPAddr, data []byte) *Packet{
+	p := Packet{Caller: c, TimeStamp: time.Now().Format(PACKET_TIMESTAMP_FORMAT), Data: data}
+	return &p
+}
+
+
+func GetTimeStamp(p *Packet) (time.Time, error){
+	t, err := time.Parse(PACKET_TIMESTAMP_FORMAT, (*p).TimeStamp)
+	if err != nil{
+		log.Printf("TIME PARSE ERROR: %s", err);
+		return t, err;
+	}
+	return t,nil;
+}
+
 
 func Encode(p Packet) ([]byte, error){
 	var buffer bytes.Buffer
