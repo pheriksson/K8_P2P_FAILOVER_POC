@@ -2,25 +2,24 @@ package network;
 
 import (
 	"log"
-	"fmt"
 	"net"
 )
 
 type Network struct {
 	Addr		*net.UDPAddr
-	pocChannel	chan<- Packet 
+	pocChan	chan<- Packet 
 }
 
 
 
 
-func InitNetwork(ip string, port int) *Network{
+func InitNetwork(ip string, port int, ch chan<-Packet) *Network{
 	addr := &net.UDPAddr{IP:net.ParseIP(ip), Port: port};
-	return &Network{addr, make(chan Packet)}
+	return &Network{addr, ch}
 }
 
 func (n *Network) Listen(){
-	fmt.Println("listening on port...")
+	log.Printf("Listening on: %s", n.Addr.String())
 	conn, err := net.ListenUDP("udp", n.Addr);
 	if err != nil {
 		log.Panic("CANNOT BIND TO ADDR:", n.Addr);
@@ -39,14 +38,11 @@ func (n *Network) Listen(){
 
 func (n *Network) handleRequest(caller *net.UDPAddr, packet []byte){
 	decPacket, err := Decode(packet)
-	log.Printf("RECIEVED MSG: [%s]", decPacket.Data)
 	if err != nil {
 		log.Printf("FAILED TO DECODE INCOMING PACKET FROM %s. ERROR: %s", caller.String(), err)
 	}
 	go func(){
-		//log.Printf("TESTING ECHO TO: [%s:%d]", decPacket.Caller.IP, decPacket.Caller.Port)
-		//n.SendRequest(decPacket.Caller, []byte{1})
-		n.pocChannel <- decPacket	
+		n.pocChan <- decPacket	
 	}()
 }
 
