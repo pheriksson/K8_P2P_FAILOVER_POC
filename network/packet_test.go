@@ -4,29 +4,15 @@ import (
 	"bytes"
 	"net"
 	"testing"
-	"time"
 )
-
-func TestPacketTimestampFormat(t *testing.T){
-	testPacket := NewPacket(&net.UDPAddr{},[]byte{})
-	timeStamp, err := GetTimeStamp(testPacket)
-	if err != nil{
-		t.Errorf("Could not get valid format for packet timestamp: %s", err)
-	}
-	if (testPacket.TimeStamp != timeStamp.Format(PACKET_TIMESTAMP_FORMAT)){
-		t.Errorf("Invalid time formatting for packets")
-	}
-}
-
 
 func TestEncodeDecode(t *testing.T){
 	// Init packet attributes.
-	wantAddr := &net.UDPAddr{}
-	wantTime := time.Now().String() 
-	wantData := []byte{2}
+	wantAddr := &net.UDPAddr{IP:net.ParseIP("127.0.0.1"), Port: 35000}
+	wantData := []byte{1,2,3,4,5}
 
 	// Init packet object.
-	wantPacket := Packet{wantAddr, wantTime, wantData} 
+	wantPacket := Packet{wantAddr, wantData} 
 
 	encodePacket, err := Encode(wantPacket)
 	if err != nil{
@@ -41,9 +27,12 @@ func TestEncodeDecode(t *testing.T){
 	if !bytes.Equal(decodePacket.Data, wantData){
 		t.Errorf("\nWANTED: %b \nGOT: %b", wantData, decodePacket.Data)
 	}
-	if !(decodePacket.TimeStamp == wantTime){
-		t.Errorf("\nWANTED: %s \nGOT: %s", wantTime, decodePacket.TimeStamp)
-	}	
+	if wantAddr.IP.String() != decodePacket.Caller.IP.String(){
+		t.Errorf("\nWANTED: %s \nGOT: %s", wantAddr.IP.String(), decodePacket.Caller.IP.String())
+	}
+	if wantAddr.Port != decodePacket.Caller.Port{
+		t.Errorf("\nWANTED: %d \nGOT: %d", wantAddr.Port, decodePacket.Caller.Port)
+	}
 }
 
 

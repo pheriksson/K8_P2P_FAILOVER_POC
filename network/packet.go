@@ -5,33 +5,17 @@ import (
 	"encoding/gob"
 	"log"
 	"net"
-	"time"
 )
-
-const PACKET_TIMESTAMP_FORMAT = "2006-01-02 15:04:05" 
 
 type Packet struct {
 	Caller *net.UDPAddr
-	TimeStamp string 
 	Data   []byte
 }
 
 func NewPacket(c *net.UDPAddr, data []byte) *Packet{
-	p := Packet{Caller: c, TimeStamp: time.Now().Format(PACKET_TIMESTAMP_FORMAT), Data: data}
+	p := Packet{Caller: c, Data: data}
 	return &p
 }
-
-
-
-func GetTimeStamp(p *Packet) (time.Time, error){
-	t, err := time.Parse(PACKET_TIMESTAMP_FORMAT, (*p).TimeStamp)
-	if err != nil{
-		log.Printf("TIME PARSE ERROR: %s", err);
-		return t, err;
-	}
-	return t,nil;
-}
-
 
 func Encode(p Packet) ([]byte, error){
 	var buffer bytes.Buffer
@@ -58,5 +42,4 @@ func Decode(rawPacket []byte) (Packet, error){
 	}
 	return packet, nil;
 }
-
 
