@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	HEARTBEAT_FREQ = 10
+	HEARTBEAT_FREQ = 5
+	HEARTBEAT_TIMEOUT_VALID_MULTIPLIER = 2 // Num HEARTBEAT_FREQ is allowed to pass until peer is deemed inactive. 	
 )
 
 type PoC struct{
@@ -56,23 +57,33 @@ func (p *PoC) startHeartbeat(addr string, heartbeat time.Duration){
 			return
 		}
 		if status {
-			// Send heartbeat and await confirmation.
-			// Basically add other go routine to check if response has returned.
-
-			fmt.Println("TODO: Send heartbeat to peer:",addr)
+			// INSERT: PING ADDR
+			func(){
+				for n:= 0; n<HEARTBEAT_TIMEOUT_VALID_MULTIPLIER; n++{
+					select{
+					case <-time.After(time.Duration(HEARTBEAT_FREQ*time.Second)):
+						valid, err := p.peers.ValidTTL(addr)
+						if err != nil{
+							log.Panic("UNEXPECTED ENTRY REMOVED. ERR:",err)	
+						}
+						if valid {return}	
+					}
+				}
+				p.peers.DeactivatePeer(addr)
+			}()
+			nextHeartbeat = time.Duration(HEARTBEAT_FREQ*time.Second)
 		}
 		p.startHeartbeat(addr, nextHeartbeat)
 		}
 	}()
-
 }
-
 
 func (p *PoC) handleRequest(packet network.Packet){
 	// Currently treaing any incoming rpc as a heartbeat.
 	// Call to updateTTL for user at packet and set their status to active.
 
 	fmt.Println("Recieved packet:", packet)
+	p.peers.UpdateTTL(packet.Caller.IP.String())	
 }
 
 

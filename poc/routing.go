@@ -34,7 +34,6 @@ func (p *PeerRouting) GetHeartbeatRequired(addr string) (bool, time.Duration, er
 	// TODO: Dependent on co routine runtime will pass timer or just about repeat until
 	// time has 'time' to update, meaning might get 5k calls with heartbeat ttl of < 1ns otherwise. 
 	if timeNextHeartbeat < TIME_RANGE_HEARTBEAT {
-		pr.ttl = time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ))
 		return true, time.Duration(time.Second*HEARTBEAT_FREQ), nil 
 	}
 	// Time still left until heartbeat ( > TIME_RANGE_HEARTBEAT).
@@ -45,6 +44,7 @@ func (p *PeerRouting) UpdateTTL(addr string) (error){
 	pr, exist := p.peers[addr]
 	if exist {
 		pr.ttl = time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ))
+		pr.active = true
 		return nil
 	}
 	return fmt.Errorf("NO ENTRY")
@@ -58,10 +58,18 @@ func (p *PeerRouting) ValidTTL(addr string) (bool, error){
 	return (pr.ttl.Sub(time.Now()) > 0), nil
 }
 
+func (p *PeerRouting) DeactivatePeer(addr string){
+	pr, exists := p.peers[addr]
+	if !exists {
+		return
+	}
+	pr.active = false
+}
+
 func (p *PeerRouting) AddPeer(addr string, contact string, hz int) error{
 	_, exists := p.peers[addr]
 	if exists{
-		return fmt.Errorf("ADDR ALRDY EXISTS") 
+		return fmt.Errorf("ENTRY EXISTS") 
 	}
 	p.peers[addr] = &peer{ttl: time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ)), auth: "secret key", contact: contact, addr: addr}
 	return nil
