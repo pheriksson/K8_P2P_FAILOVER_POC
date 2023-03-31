@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	TIME_FAIL_RANGE_NEW_HEARTBEAT_SECCONDS=time.Duration(1*time.Second)
+	TIME_RANGE_HEARTBEAT = 1
 )
 
 type PeerRouting struct{
@@ -14,10 +14,11 @@ type PeerRouting struct{
 }
 
 type peer struct{
-	ttl time.Time // Basically if a communication has not been reached before ttl, deem peer as inactive.
+	ttl time.Time 
 	auth string // not used. 
 	contact string
 	active bool
+	addr string
 }
 
 func InitPeerRouting() *PeerRouting{
@@ -25,54 +26,44 @@ func InitPeerRouting() *PeerRouting{
 }
 
 func (p *PeerRouting) GetHeartbeatRequired(addr string) (bool, time.Duration, error){
-	fmt.Println("Recieved request of:", addr)
 	pr, exist := p.peers[addr]
-	fmt.Println()
 	if !exist {
 		return false, time.Duration(time.Second), fmt.Errorf("NO ENTRY OF PEER");
 	}
-	timeNextHeartbeatTest:= pr.ttl.Sub(time.Now()).Seconds()
-	fmt.Println("time until heartbeat: [", timeNextHeartbeatTest, "ms]")
-	if timeNextHeartbeatTest < 1 {
-		fmt.Println("Time elapsed -> need to update with heartbeat ping")
+	timeNextHeartbeat:= pr.ttl.Sub(time.Now())
+	// TODO: Dependent on co routine runtime will pass timer or just about repeat until
+	// time has 'time' to update, meaning might get 5k calls with heartbeat ttl of < 1ns otherwise. 
+	if timeNextHeartbeat < TIME_RANGE_HEARTBEAT {
 		pr.ttl = time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ))
-		fmt.Println("Time elapsed, setting new TTL for in:", pr.ttl.Sub(time.Now()).Seconds())
-		return true, time.Duration(time.Second*HEARTBEAT_FREQ), nil // No need to heartbeat, but we need to check in
+		return true, time.Duration(time.Second*HEARTBEAT_FREQ), nil 
 	}
-	// Time still left until heartbeat.
-	return false, time.Duration(timeNextHeartbeatTest), nil
+	// Time still left until heartbeat ( > TIME_RANGE_HEARTBEAT).
+	return false, time.Duration(timeNextHeartbeat), nil
 }
 
 func (p *PeerRouting) UpdateTTL(addr string) (error){
 	pr, exist := p.peers[addr]
 	if exist {
 		pr.ttl = time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ))
-		fmt.Println("NEW TTL SET TO OCCUR IN:",pr.ttl.Sub(time.Now()).Seconds())
 		return nil
 	}
 	return fmt.Errorf("NO ENTRY")
 }
 
-func (p *PeerRouting) GetTTL(addr string) (time.Time, error){
-	pr, exist := p.peers[addr]
-	if exist {
-		return pr.ttl, nil
+func (p *PeerRouting) ValidTTL(addr string) (bool, error){
+	pr, exists := p.peers[addr]
+	if !exists {
+		return false, fmt.Errorf("NO ENTRY")
 	}
-	return time.Now(), fmt.Errorf("NO ENTRY")
+	return (pr.ttl.Sub(time.Now()) > 0), nil
 }
-
-
-
 
 func (p *PeerRouting) AddPeer(addr string, contact string, hz int) error{
 	_, exists := p.peers[addr]
 	if exists{
 		return fmt.Errorf("ADDR ALRDY EXISTS") 
 	}
-
-	p.peers[addr] = &peer{ttl: time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ)), auth: "secret key", contact: contact}
-	fmt.Println("FOR USER:", addr)
-	fmt.Println("ADDED USER: ", p.peers[addr])
+	p.peers[addr] = &peer{ttl: time.Now().Add(time.Duration(time.Second*HEARTBEAT_FREQ)), auth: "secret key", contact: contact, addr: addr}
 	return nil
 }
 
