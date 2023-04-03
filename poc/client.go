@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/pheriksson/K8_P2P_FAILOVER_POC/kube"
@@ -36,8 +37,10 @@ type PoC struct{
 	role		RaftStatus	
 	// Catch all chan used to catch any further terms.
 	oldTerm		chan int
+	oldTermMut	sync.Mutex
 	leaderVote	chan int
-	quorum int
+	quorum		int
+
 }
 
 
@@ -50,7 +53,9 @@ func InitPoC(ip string, port int) *PoC{
 		peers: InitPeerRouting(),
 		role: MEMBER,
 		oldTerm: make(chan int),
+		oldTermMut: sync.Mutex{},
 		leaderVote: make(chan int),
+		
 	}
 	return &p
 }
@@ -79,7 +84,7 @@ func (p *PoC) startModifiedRAFT(){
 		p.startHeartbeat(HEARTBEAT_FREQ*time.Second)
 		if statusLeaderInit {
 			// TODO: START PINGING ALL MEMBERS.
-			// TODO: At time T, send to candidate payload.
+			// TODO: At time T, send volumes to candidate payload.
 		}else{
 			log.Println("FAILED LEADER SELECTION - continuing as MEMBER")
 		}
@@ -94,7 +99,7 @@ func (p *PoC) startModifiedRAFT(){
 		log.Println("SELF AS MEMBER")
 		leaderExistError := p.getLeaderTTL()
 		if leaderExistError != nil{
-			// No leader -> Try and become leader by advanding term by 1.  
+			// No leader -> Try and become leader by advancing term by 1.  
 			p.requestLeaderVotes(p.peers.self.term+1)
 		}
 	default:
@@ -107,10 +112,6 @@ func (p *PoC) startModifiedRAFT(){
 func (p *PoC) requestLeaderVotes(newTerm int) bool{
 	log.Printf("PREV TERM: %d\nSTARTING LEADER FOR TERM: %d", p.peers.GetTerm(), newTerm)
 	numVotes := 0
-	// NOTE: Might have to empty leaderVote channel here.
-	// TODO Insert mutex to lock channel write to leaderVote until timeout/newterm/or quorum
-	//mutex channelLeaderVote unlock. -> and when trying to write to channel, make sure that the term is the same in package as current term -> success.
-	//defer mutex channelLeaderVote lock.
 	for{
 		select{
 		case <-p.leaderVote:
@@ -123,7 +124,6 @@ func (p *PoC) requestLeaderVotes(newTerm int) bool{
 				return true
 			}
 		case newTerm := <-p.oldTerm:
-			// Someone else started vote for leader.
 			log.Println("RECIEVED NEW TERM - ABORTING LEADER ELECTION:", newTerm)
 			return false
 		case <-time.After(time.Duration(time.Second*LEADER_REQUEST_TIMEOUT_SECONDS)):
@@ -163,19 +163,13 @@ func (p *PoC) initLeaderRole() (bool, error){
 			log.Println("CAND-CONFIRMATION",candConfirmation)
 			return true, nil
 		case newTerm := <-p.oldTerm:
-			// TODO: Make sure that channel is written to incase of new term.
-			// Update term in receiving packages (as we will aknowledge).
 			log.Println("NEW TERM AKNOWLEDGED - ", newTerm)
-			// NOTE: Incoming package should update and set self to become member.
 			return false, nil
 		}
 
 	}
 }
 
-// TODO: Make sure this is used by LEADER.
-// TODO: Ping every peer. 
-// TODO: Read channel for new term -> (healing from partition -> new cuorum).
 func (p *PoC) startHeartbeat(heartbeat time.Duration){
 	go func(){
 		members := p.peers.GetMembers()
@@ -183,10 +177,10 @@ func (p *PoC) startHeartbeat(heartbeat time.Duration){
 			select{
 			case <-time.After(heartbeat):
 				for _, addr := range members{
+					//TODO Send ping to all members.
 					fmt.Printf("SIMULATING PING TO: %s",addr)
 				}
 			case <-p.oldTerm:
-				// NOTE -> NEED TO REGISTER NEW TERM BEFORE SENDING TO CHANNEL OLD TERM AND ASSIGN SELF TO MEMBER
 				log.Printf("REGISTERED NEW TERM OF: %d", p.peers.GetTerm())
 				return
 			}
@@ -194,18 +188,12 @@ func (p *PoC) startHeartbeat(heartbeat time.Duration){
 	}()
 }
 
-// TODO: This is to be used by CANDIDATE, MEMBER, simply await for timeout and refresh with new ttl after each timeout timer.
-// TODO: READ NEW TERM CHANNEL ASWELL - Partition healing, if not and both leader and this simply awaits, no self healing.
-// So have to react to new terms from either methods. 
 func (p *PoC) timeoutLeader(heartbeatTimeout time.Duration){
-	//newLeaderPacket := make(chan struct{}) // Have this channel written to incase of new leader selection registered 
 	go func(){
 		select{
 		case <- time.After(heartbeatTimeout):
-			// heartbeatTimeout -> get new heartbeat incase of incoming ttl packet by leader. 		
 			timeout, nextHeartbeatTimeout, err := p.peers.GetDisconnectLeader()
 			if err != nil{
-				// Leader unknown/not registered. 
 				log.Printf("UNKNOWN LEADER. %s", err)
 				return
 			}
@@ -224,40 +212,56 @@ func (p *PoC) timeoutLeader(heartbeatTimeout time.Duration){
 
 // Keep hash log of volumes as commit log?
 func (p *PoC) handleRequest(packet network.Packet){
-	// Currently treaing any incoming rpc as a heartbeat.
-	// Call to updateTTL for user at packet and set their status to active.
-	// On new term -> send to channel of new term.
-	// On package from leader -> increase TTL.
-	// Else, just perform action. 
-	// Ok RPC we will respond to. Any package will update the peers TTL (as long as it exists within the route). 
-
 	callerAddrs := packet.Caller.IP.String()
-	fmt.Println("Recieved packet from:", callerAddrs)
-	// Check that peer is within allowed routing.
 	if !p.peers.IsPeer(callerAddrs){
 		log.Printf("UNKNOWN PEER REQUEST - %s", callerAddrs)
 		return
 	}
-	// Decode packet to corresponding rpc.
-	
+	p.peers.UpdateTTL(callerAddrs)
+	// TODO: Refactor
+	checkTerm  := func(t int){
+		if p.checkTerm(t){
+			//Term reached, default to member
+			return
+		}
+	}
+	switch packet.Type{
+	case network.RAFT_VOTE:
+		val, err := decodePayload[Vote](packet.Data)	
+		checkTerm(val.Term)
+		go func(){
+			log.Println("RECIEVED: ", val, err)
+		}()
+	case network.RAFT_REQUEST_VOTE:
+		val, err := decodePayload[RequestVote](packet.Data)	
+		checkTerm(val.Term)
+		go func(){
+			log.Println("RECIEVED: ", val, err)
+		}()
+	case network.REQUEST_PERSISTENT_VOLUMES:
+		val, err := decodePayload[RequestVolumes](packet.Data)	
+		checkTerm(val.Term)
+		go func(){
+			log.Println("RECIEVED: ", val, err)
+		}()
+	}
+}
 
-	go func(){
-		p.leaderVote<-1
-	}()
-	fmt.Println("WRITEN TO CHANNEL");
-	p.peers.UpdateTTL(packet.Caller.IP.String())
+func (p *PoC) checkTerm(incTerm int) bool{
+	p.oldTermMut.Lock()
+	defer p.oldTermMut.Unlock()
+	if incTerm > p.peers.GetTerm(){
+		p.peers.BecomeMember(incTerm)
+		p.oldTerm <- incTerm
+		return true 
+	}
+	return false
 }
 
 
 func (p *PoC) StartPoc(){
 	go p.net.Listen()
 	p.registerPeer("127.0.0.2", "TESTING - PEER1")
-//	p.registerPeer("127.0.0.3", "TESTING - PEER2")
-//	p.registerPeer("127.0.0.4", "TESTING - PEER3")
-//	p.registerPeer("127.0.0.5", "TESTING - PEER4")
-//	p.registerPeer("127.0.0.6", "TESTING - PEER5")
-//	p.registerPeer("127.0.0.7", "TESTING - PEER6")
-
 	go p.startModifiedRAFT()
 	go func(){
 		time.Sleep(time.Second*2)
@@ -281,11 +285,9 @@ func (p *PoC) StartPoc(){
 	}
 }
 
-
-
-
 func (p *PoC) TestSendLocalRequest(port int, msg string){
-	p.net.SendRequest(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port} , []byte(msg))
+	test, _ := encodePayload(RequestVolumes{2})
+	p.net.SendRequest(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port} , test)
 }
 
 

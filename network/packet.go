@@ -10,7 +10,16 @@ import (
 type Packet struct {
 	Caller *net.UDPAddr
 	Data   []byte
+	Type DataType
 }
+
+type DataType int
+
+const(
+	RAFT_VOTE DataType = iota
+	RAFT_REQUEST_VOTE
+	REQUEST_PERSISTENT_VOLUMES
+)
 
 func NewPacket(c *net.UDPAddr, data []byte) *Packet{
 	p := Packet{Caller: c, Data: data}
