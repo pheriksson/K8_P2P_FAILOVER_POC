@@ -16,13 +16,33 @@ type Packet struct {
 type DataType int
 
 const(
-	RAFT_VOTE DataType = iota
-	RAFT_REQUEST_VOTE
+	RAFT_VOTE_LEADER DataType = iota
+	RAFT_VOTE_CANDIDATE
+	RAFT_HEALTH	
+	RAFT_MEMBER_REQUEST_VOTE
+	RAFT_CANDIDATE_REQUEST_VOTE
 	REQUEST_PERSISTENT_VOLUMES
 )
 
-func NewPacket(c *net.UDPAddr, data []byte) *Packet{
-	p := Packet{Caller: c, Data: data}
+func (d DataType) ToString() string{
+	switch (d){
+	case RAFT_VOTE_LEADER:
+		return "RAFT_VOTE_LEADER"
+	case RAFT_VOTE_CANDIDATE:
+		return "RAFT_VOTE_CANDIDATE"
+	case RAFT_HEALTH:
+		return "RAFT_HEALTH"
+	case RAFT_MEMBER_REQUEST_VOTE:
+		return "RAFT_MEMBER_REQUEST_VOTE"
+	default:
+		return "UNKNOWN"
+	}
+
+
+}
+
+func NewPacket(c *net.UDPAddr, data []byte, dt DataType) *Packet{
+	p := Packet{Caller: c, Data: data, Type: dt}
 	return &p
 }
 

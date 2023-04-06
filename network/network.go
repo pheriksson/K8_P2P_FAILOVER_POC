@@ -46,8 +46,8 @@ func (n *Network) handleRequest(caller *net.UDPAddr, packet []byte){
 	}()
 }
 
-func (n *Network) SendRequest(target *net.UDPAddr, data []byte){
-	packet := NewPacket(n.Addr, data)
+func (n *Network) SendRequest(target *net.UDPAddr, data []byte, dt DataType){
+	packet := NewPacket(n.Addr, data, dt)
 	encPacket, err := Encode(*packet)
 	if err != nil {
 		log.Printf("FAILED TO ENCODE PACKET ADDRESSED TO %s. ERROR: %s", target,err)

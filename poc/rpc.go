@@ -6,15 +6,27 @@ import(
 	"log"
 )
 
-
-type RequestVote struct{
+// TODO: Data transfer from candidate to members.
+// -> When candidate recieves volume, simply send to rest of members. 
+type VoteLeader struct{
 	Term int
-	Leader string
-}
-
-type Vote struct{
-	Term int
+	LeaderAddr string
 	Agreed bool
+}
+// Used as candidate confirmation of leader and candidate 
+type VoteCandidate struct{
+	Term int
+	LeaderAddr string
+	CandidateAddr string
+	Agreed bool	
+}
+// Used as ping by leader to all - discovery of member to candidate.
+// And to be used by candidate to notify of leader health deteriating. 
+type Health struct{
+	Term int
+	LeaderAddr string
+	CandidateAddr string
+	Stable	bool
 }
 
 type RequestVolumes struct{
@@ -22,7 +34,7 @@ type RequestVolumes struct{
 }
 
 type Payload interface {
-	Vote | RequestVolumes | RequestVote
+	VoteLeader | VoteCandidate | Health | RequestVolumes
 }
 
 func decodePayload[T Payload](rawPacket []byte) (T, error){

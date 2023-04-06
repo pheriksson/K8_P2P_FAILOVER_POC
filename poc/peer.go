@@ -30,6 +30,10 @@ func InitPeer(addr string, hostname string) *Peer{
 	}
 }
 
+func (p *Peer) GetAddr() string{
+	return p.addr;
+}
+
 func (p *Peer) GetTimeRemaining() time.Duration{
 	ttlTime := p.ttl.Sub(time.Now())
 	if ttlTime < 0{
@@ -48,6 +52,10 @@ func (p *Peer) IsLeader() bool{
 	return p.role == LEADER
 }
 
+func (p *Peer) IsCandidate() bool{
+	return p.role == CANDIDATE
+}
+
 func (p *Peer) IsMember() bool{
 	return p.role == MEMBER
 }
@@ -64,6 +72,14 @@ func (p *Peer) GetTerm() int{
 func (p *Peer) deactivatePeer() {
 	p.active = false
 	p.role = MEMBER
+}
+
+func (p *Peer) RaiseTerm(increase int){
+	p.term+=increase	
+}
+
+func (p *Peer) LowerTerm(decrease int){
+	p.term-=decrease	
 }
 
 func (p *Peer) ToString() string{
