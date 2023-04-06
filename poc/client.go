@@ -24,7 +24,9 @@ const (
 	TESTING_PORT = 9999
 	TIME_SEC_AWAIT_CANDIDATE_RESPONSE = 10
 	MISSING_CANDIDATE_STRING = "TBD"
+	RANDOM_NUMBER_RANGE = 6000
 )
+
 
 type RaftStatus int
 
@@ -54,6 +56,7 @@ type PoC struct{
 	runningElectionMut sync.Mutex
 	runningElection bool
 	quorum		int
+	r	int 
 }
 
 
@@ -74,6 +77,7 @@ func InitPoC(ip string, port int) *PoC{
 		startEarlyFailover: make(chan bool),
 		runningElectionMut: sync.Mutex{},
 		runningElection : false,
+		r: rand.Intn(RANDOM_NUMBER_RANGE),
 	}
 	return &p
 }
@@ -90,19 +94,21 @@ func (p *PoC) registerPeer(addr string, contact string){
 
 func (p *PoC) startModifiedRAFT(){
 	p.quorum = p.peers.LockRoutingTableEntries()
-	p.roleLog("STARTING RAFT AS:"+p.peers.self.ToString()+", QUORUM AT:"+strconv.Itoa(p.quorum))
+	p.roleLog("STARTING MODIFIED RAFT AS:"+p.peers.self.ToString()+", QUORUM AT:"+strconv.Itoa(p.quorum))
 	for{
 	switch (p.peers.GetRole()){
 	case LEADER:
 		// TODO: Need to init kubernetes cluster and have appropriate channel to early failover to candidate. 
 		p.roleLog("SELF AS LEADER")
-		done := make(chan bool,1) 
-		heartbeatTerminate := make(chan bool) // Channel to terminate heartbeat.
-		go p.startHeartbeat(HEARTBEAT_FREQ*time.Second, done, heartbeatTerminate)
-		confirmedCandidate := p.assignCandidate(done)
+		newTerm := make(chan bool) 
+		// volume can terminate HB on loss of candidate ping and if no candidatePromoti is confirmed -> size 1 for no DL
+		termHeartbeat := make(chan bool, 1) // Channel to terminate heartbeat.
+		go p.startHeartbeat(HEARTBEAT_FREQ*time.Second, newTerm, termHeartbeat)
+		confirmedCandidate := p.assignCandidate(newTerm)
 		if confirmedCandidate{
-			p.startVolumeWindowCandidate(done, heartbeatTerminate)
-		}	
+			p.startVolumeWindowCandidate(newTerm, termHeartbeat)
+		}
+		termHeartbeat <- true
 	case CANDIDATE:
 		// TODO: Case of early failover - Leader msg of recovery from latest volume(s).
 		p.roleLog("SELF AS CANDIDATE")
@@ -112,7 +118,6 @@ func (p *PoC) startModifiedRAFT(){
 			p.requestLeaderVotes(2)	
 		}
 	case MEMBER:
-		// TODO: Case of accepting leader vote, hold until confirmation of new leader. 
 		p.roleLog("SELF AS MEMBER")
 		noLeaderError := p.watchLeader() 
 		if noLeaderError != nil{
@@ -130,19 +135,18 @@ func (p *PoC) startModifiedRAFT(){
 func (p *PoC) requestLeaderVotes(incTerm int) bool{
 	p.roleLog("STARTING LEADER FOR TERM:+"+strconv.Itoa((p.peers.GetTerm()+incTerm)))
 	p.peers.RaiseTerm(incTerm)
-	r := rand.Intn(6000) // TODO: set new random time. 
 	numVotes := 0
 	members := p.peers.GetPeersAddress()
 	for{
 		// Send out all request replies.
 		p.sendRequestLeaderVotes(members, p.peers.GetTerm())
-		// Note, might have to start a bit of a time delay on this one.
 		select{
 		case <-p.leaderVote:
 			numVotes+= 1
 		        p.roleLog("RECIEVED ANOTHER VOTE, TOTAL:"+strconv.Itoa(numVotes))
 			if (numVotes >= p.quorum){
 				p.peers.BecomeLeader()
+				p.roleLog("NEW ROLE: LEADER")
 			        // Bootstrap one health check to init leader role.
 			        p.sendLeaderPings(p.peers.GetPeersAddress())
 				return true
@@ -152,12 +156,9 @@ func (p *PoC) requestLeaderVotes(incTerm int) bool{
 			return false
 		case <-time.After(time.Duration(time.Second*TIME_SEC_SEND_LEADER_ELECTION)):
 		        p.roleLog("TIMEOUT LEADER ELECTION. RECIEVED ("+strconv.Itoa(numVotes)+"/"+strconv.Itoa(p.quorum)+")") 
-		        p.roleLog("LOWERING TERM TO TERM:"+strconv.Itoa(p.peers.GetTerm()-incTerm))
 		        p.peers.LowerTerm(incTerm) 
-		        sleepDuration := time.Duration(r)*time.Millisecond
-		        log.Println("SLEEPING FOR ", sleepDuration)
-	                p.roleLog("RANDOM SLEEP")
-	                time.Sleep(sleepDuration)	
+	                p.roleLog("RANDOM SLEEP TO AWAIT ELECTION/PART HEALING")
+	                time.Sleep(time.Duration(p.r)*time.Millisecond)
 			return false
 		}
 	}
@@ -183,27 +184,19 @@ func (p *PoC) listenLeader(heartbeatTimeout time.Duration){
 	case <- time.After(heartbeatTimeout):
 		timeout, nextHeartbeatTimeout, err := p.peers.CheckLeaderTimeout()
 		if err != nil || timeout{
-			log.Printf("LEADER TIMEOUT OCCURED")
+			p.roleLog("LEADER TIMEOUT")	
 			return 
 		}
-		log.Printf("AWAITING NEXT HEARTBEAT IN %f", nextHeartbeatTimeout.Seconds())
+		p.roleLog("HB EXPECTED IN:"+nextHeartbeatTimeout.String())
 		p.listenLeader(nextHeartbeatTimeout)
 	case <-p.oldTerm:
-		log.Println("NEW TERM REACHED IN LISTEN LEADER")
-		return
-	case <-p.candidatePromotion:
-		log.Println("PROMOTED TO CANDIDATE")
-		promoted := p.peers.BecomeCandidate()
-		if promoted {
-			log.Println("PROMOTED CONFIREMD -> SEND CONF TO LEADER")
-			err := p.sendReplyCandidateVote()
-			if err != nil{
-				log.Println("FAILED TO CONFIRM PROMOTION TO LEADER - REVERT TO MEMBER. ERR:",err)
-				p.peers.BecomeMember(p.peers.GetTerm())
-			}
-			return
+		p.roleLog("NEW TERM REACHED")
+		if p.peers.BecomeMember(p.peers.GetTerm()){
+			p.roleLog("DEMOTED TO MEMBER")
 		}
+		return
 	case <- p.startEarlyFailover:
+		p.roleLog("<<---- TODO: INSERT EARLY FAILOVER")
 		if (p.peers.GetRole() == CANDIDATE){
 			p.awaitKubernetesCluster()
 			return
@@ -231,39 +224,28 @@ func (p *PoC) assignCandidate(abort chan bool) bool{
 	allPeers := p.peers.GetPeersAddress()
 	for _, peer := range allPeers{
 		if (peer == ""){continue}
-		        p.roleLog("SEND BECOME CANDIDATE TO CAND:"+peer)
-			p.sendRequestCandidateVote(peer) 
-			select{
-			case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE):
-		                p.roleLog("FAILED TO GET CONFIRMATION FROM: "+peer)	
-			case confirmed :=<-p.candidatePromotionConfirmed:
-				log.Println("GOT CAND CONFIRMATION FROM: ", confirmed)
-				if confirmed == peer{
-			                // Here bug with two members believign they're candidates.
-					log.Println("Got confirmation of promotion from candidate.")	
-					return true	
-				}
-			case <-abort:
-				log.Println("Aborting candidate selection due to hearbeat notification of new term.")
-				return false
+		p.roleLog("SEND BECOME CANDIDATE TO CAND:"+peer)
+		p.sendRequestCandidateVote(peer) 
+		select{
+		case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE):
+		        p.roleLog("FAILED TO GET CONFIRMATION FROM: "+peer)	
+		case confirmed :=<-p.candidatePromotionConfirmed:
+			if confirmed == peer{
+		                // Here bug with two members believign they're candidates.
+				p.roleLog("GOT CANDIDATE CONFIRMATION FROM: "+confirmed)
+				p.peers.MakeCandidate(confirmed)
+				return true	
 			}
+		case <-abort:
+			log.Println("Aborting candidate selection due to hearbeat notification of new term.")
+			return false
+		}
 	}
 	p.roleLog("CYCLED THROUGH ALL MEMBERS, RESTARTING CYCLING.")
 	return p.assignCandidate(abort)
 
 }
 
-
-
-
-func contains(slize []*Peer, p *Peer) bool{
-	for _, peer := range slize{
-		if peer == p {
-			return true
-		}
-	}
-	return false
-}
 
 // TODO: Unhealthy cluster. Notfiy leader of promoting candidate.
 func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool, stopHeartbeat <-chan bool){
@@ -277,40 +259,38 @@ func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool,
 			stopVolumeRpc<-true 
 			return
 		case <-stopHeartbeat:
-			log.Println("RECIEVED STOP FROM LEAVING LEADER STATE")		
+			log.Println("HEARBEAT - RECIEVED STOP FROM LEAVING LEADER STATE")		
 			return
 	}
 	}
 }
 
 func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartbeat chan bool){
-	// If returning here from candidate
-	go func(){
+	p.roleLog("INITIATING PERSISTENT VOLUME WINDOW TRANSFER")
+	for{
 		select{
 		case <-time.After(time.Second*TIME_SEC_SEND_VOLUME_CANDIDATE):
 			candAddr, err := p.peers.GetCandidateAddress()
 			if err != nil{
 				// Invalid leader state - missing candidate. 
-				log.Println("INVALID STATE, SIGNAL HEARTBEAT TO STOP AND RETURN.")
+				p.roleLog("INVALID STATE: MISSING CANDIDATE")
 				stopHeartbeat<-true	
 				return
 			}
-			log.Println("TODO SEND VOLUME TO CAND ADDR: ", candAddr)
+			p.roleLog("TODO: SEND VOLUME TO CANDIDATE:"+ candAddr)	
 			select{
 				case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE):
-					log.Println("TIMEOUT RESPONSE OF VOLUME - ASSUMING CANDIDATE DEAD. ")
-					go func(){stopHeartbeat<- true}() // Require go func incase we recieve a stop while cand confirmation. 
-					
-				case candidateConfirmation := <-p.candidateVolumeConfirmation:
-					log.Println("RECIEVED CAND CONF: ", candidateConfirmation)
+					p.roleLog("TIMEOUT RESPONSE OF VOLUME - ASSUMING CANDIDATE DEAD")
+					stopHeartbeat<- true
+					return
+				case <-p.candidateVolumeConfirmation:
+					p.roleLog("RECIEVED CAND CONFIRMATION OF VOLUME")
 			}	
 		case <-stopFromHeartbeat:
 			// New term recieved.
-			log.Println("RECIEVED STOP SIGNAL IN VOLUME WINDOW CANDIDATE")		
 			return
-			
 		}
-	}()
+	}
 
 }
 
@@ -318,14 +298,15 @@ func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartb
 func (p *PoC) handleRequest(packet network.Packet){
 	callerAddrs := packet.Caller.IP.String()
 	if !p.peers.IsPeer(callerAddrs){
-		p.roleLog("UNKNOWN PEER REQUEST - ["+callerAddrs+"]"+" PACKET TYPE:"+strconv.Itoa(int(packet.Type)))
-		log.Println(packet.Type)
+		p.roleLog("UNKNOWN PEER REQUEST - ["+callerAddrs+"]"+" PACKET TYPE:"+packet.Type.ToString())
 		return
 	}
-	p.roleLog("RECIEVED PACKAGE TYPE:"+packet.Type.ToString())
+	// TODO: BUG when leader joins quickly from disconnecting (as member), will start to ping for election ()
+	// And other will register as current leader pinging, but infact prev leader is out of sync and dead (as in member starte).
+	// Can be recovered by candidate pinging leader for confirmation, or simply move updateTTL for every request.
 	err := p.peers.UpdateTTL(callerAddrs)
 	if err != nil{
-		p.roleLog("FAILED DO UPDATE TTL FOR :"+callerAddrs+ " (NO ENTRY)")
+		p.roleLog("FAILED TO UPDATE TTL FOR :"+callerAddrs+ " (NO ENTRY)")
 	}
 	switch packet.Type{
 	case network.RAFT_VOTE_LEADER:
@@ -365,30 +346,25 @@ func (p *PoC) handleRequest(packet network.Packet){
 		val, err := decodePayload[VoteCandidate](packet.Data)
 		if err != nil{
 			log.Println("RAFT_VOTE_CAND ERROR:", err)
-
+			return
 		}
-		// Cases:
-		// 1, recieve request to become candidate by leader.
-		// 2, recieve response by candidate confirming/denying candidency to leader.
-		// Looked at: TRUE - not tested.
-		// Ok, if checkTerm -> only stating that inc rpc is not from new term. 
-		// Health to update leader -> candidate (local state)
 		go func(){
 			p.roleLog("RAFT_VOTE_CANDIDATE - RECIEVED: "+fmt.Sprintf("%#v",val))
-			log.Println()
 			if p.checkTerm(val.Term, val.LeaderAddr){
 				// No write to candidate promotion as oldTerm channel arldy written to by checkterm. 
 				p.roleLog("RECIEVED REQUEST TO BECOME CANDIDATE ON NEWER TERM - ACCEPT.")
-				p.peers.BecomeCandidate()
 				p.sendReplyCandidateVote()
 			}
 			if (val.Term == p.peers.GetTerm()){
 				// Same term, leader requesting candidate, or leader recieving response.  
 				lAddr, err := p.peers.GetLeaderAddr()
 				if val.LeaderAddr == lAddr && err == nil && !val.Agreed{ 
-					p.peers.BecomeCandidate()
+					// Candidate responding on same term
 					p.sendReplyCandidateVote()
-				}else if lAddr == p.peers.GetAddr() && val.Agreed{
+					return
+				}
+				if lAddr == p.peers.GetAddr() && val.Agreed{
+					// Leader recieving confirmation
 					p.candidatePromotionConfirmed <- val.CandidateAddr
 				}
 			}
@@ -396,41 +372,36 @@ func (p *PoC) handleRequest(packet network.Packet){
 	case network.RAFT_HEALTH:
 		val, err := decodePayload[Health](packet.Data)	
 		if err != nil{
-		log.Println("RAF_THEALTH ERROR: ",err)}
+			log.Println("RAFT_HEALTH ERROR PACKET FROM: ",err)
+			return
+		}
 		go func(){
 			p.roleLog("RAFT_HEALTH - RECIEVED: "+fmt.Sprintf("%#v",val))
-			if (p.checkTerm(val.Term, val.LeaderAddr)){
-				p.peers.MakeCandidate(val.CandidateAddr) 
-				return
-			}
-			if (val.Term == p.peers.GetTerm() && !val.Stable && p.peers.GetRole() == CANDIDATE){
-				p.roleLog("UNSTABLE LEADER - BECOME LEADER EARLY. ")
-				p.startEarlyFailover <- true
-			}
-			candAddr, _ := p.peers.GetCandidateAddress()
-			if (val.Term == p.peers.GetTerm() && candAddr != val.CandidateAddr && val.CandidateAddr != MISSING_CANDIDATE_STRING){
-				// Simply normal heartbeat, nothing new, check if candidate is announced.
-				p.roleLog("MAKING CANDIDATE:"+val.CandidateAddr)
-				p.peers.MakeCandidate(val.CandidateAddr)		
+			// NOTE: Ordering matters here, p.checkTerm needs to be on the LHS of OR expression.
+			if (p.checkTerm(val.Term, val.LeaderAddr) || val.Term == p.peers.GetTerm()){
+				if (p.peers.MakeCandidate(val.CandidateAddr)){
+					p.roleLog("NEW ADDRESS REGISTERED FOR: CANDIDATE")
+				}
+				if (!val.Stable && p.peers.GetRole() == CANDIDATE){
+					p.roleLog("UNSTABLE LEADER - BECOME LEADER EARLY.")
+					p.startEarlyFailover <- true
+				}
 			}
 		}()
 	}
 }
 
 func (p *PoC) checkTerm(newTerm int, leaderAddr string) bool{
-	p.roleLog("CHECKING TERM")
 	p.oldTermMut.Lock()
 	defer p.oldTermMut.Unlock()
 	if newTerm > p.peers.GetTerm(){
-		p.roleLog("NEW TERM RECIEVED: "+strconv.Itoa(newTerm))
 		p.peers.BecomeMember(newTerm)
 		p.peers.MakeLeader(leaderAddr)
-		p.roleLog("NEW LEADER:"+leaderAddr)
 		p.roleLog("NEW TERM:"+strconv.Itoa(newTerm))
+		p.roleLog("NEW LEADER:"+leaderAddr)
 		p.oldTerm <- newTerm
 		return true 
 	}
-	log.Println("NO NEW TERM")
 	return false
 }
 
@@ -477,7 +448,6 @@ func (p *PoC) sendRequestLeaderVotes(peers []string, newTerm int){
 func (p *PoC) sendReplyLeaderVote() {
 	leaderAddr, err := p.peers.GetLeaderAddr() 
 	p.roleLog("SEND REPLY LEADER VOTE, CURRENT LEADER:"+leaderAddr)
-	log.Println()
 	if err != nil{
 		p.roleLog("NO LEADER TO BE FOUND"+err.Error())
 	}
@@ -486,8 +456,6 @@ func (p *PoC) sendReplyLeaderVote() {
 		LeaderAddr: leaderAddr,
 		Agreed: true,
 	})
-	log.Println("SENDING TRUE FOR LEADER AT:",p.peers.GetTerm())
-	log.Println("ADDR:", leaderAddr)
 	if err != nil{
 		log.Println("FAILED TO ENCODE LEADER REPLY")
 	}	

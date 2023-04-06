@@ -88,6 +88,9 @@ func (p *PeerRouting) AddPeer(addr string, contact string) error{
 }
 
 func (p *PeerRouting) GetLeaderAddr() (string, error){
+	if p.self.IsLeader() {
+		return p.self.GetAddr(), nil
+	}
 	for addr, peer := range p.table{
 		if peer.IsLeader() {
 			return addr, nil 
@@ -152,8 +155,8 @@ func (p *PeerRouting) CheckLeaderTimeout() (bool, time.Duration, error){
 func (p *PeerRouting) UpdateTTL(addr string) (error){
 	pr, exist := p.table[addr]
 	if exist {
-		log.Println("TRYING TO UPDATE TTL FOR: ",pr.ToString())
 		pr.ttl = time.Now().Add(time.Duration(time.Second*TTL_TIMEOUT_SECONDS))
+		// Starting traffic - making sure no new peers can be added.
 		pr.active = true
 		return nil
 	}
@@ -174,10 +177,13 @@ func (p *PeerRouting) LowerTerm(decrease int){
 	}
 }
 
-func (p *PeerRouting) BecomeMember(newTerm int){
-	log.Println("BECAME MEMBER FOR TERM:", newTerm)
-	p.self.role = MEMBER
+func (p *PeerRouting) BecomeMember(newTerm int) bool{
 	p.self.term = newTerm 
+	if !p.self.IsMember(){
+		p.self.role = MEMBER
+		return true
+	}
+	return false
 } 
 
 func (p *PeerRouting) BecomeCandidate() bool{
@@ -188,10 +194,16 @@ func (p *PeerRouting) BecomeCandidate() bool{
 	return false
 }
 
+// Refactor - zz
 func (p *PeerRouting) MakeCandidate(addr string) bool{
-	peer, exist := p.table[addr]
-	if exist{
-		peer.role = CANDIDATE
+	for paddr, peer := range p.table{
+		if peer.IsCandidate() && paddr != addr{
+			peer.role = MEMBER
+		}
+		if (paddr == addr){peer.role = CANDIDATE}
+	}
+	if p.self.GetAddr() == addr{
+		p.self.role = CANDIDATE
 		return true
 	}
 	return false

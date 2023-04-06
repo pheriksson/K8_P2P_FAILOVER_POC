@@ -88,7 +88,7 @@ func (p *Peer) ToString() string{
 	switch p.role{
 	case LEADER:
 		roleString = "LEADER"
-		ttlString = fmt.Sprintf("%d",p.GetTimeRemaining())
+		ttlString = fmt.Sprintf("%f",p.GetTimeRemaining().Seconds())
 	case CANDIDATE:
 		roleString = "CANDIDATE"
 		ttlString = "NA"
