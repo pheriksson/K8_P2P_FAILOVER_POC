@@ -196,17 +196,20 @@ func (p *PeerRouting) BecomeCandidate() bool{
 
 // Refactor - zz
 func (p *PeerRouting) MakeCandidate(addr string) bool{
+	newCandidateAssigned := false
 	for paddr, peer := range p.table{
 		if peer.IsCandidate() && paddr != addr{
 			peer.role = MEMBER
 		}
-		if (paddr == addr){peer.role = CANDIDATE}
+		if (paddr == addr){peer.role = CANDIDATE; newCandidateAssigned = true}
 	}
-	if p.self.GetAddr() == addr{
+	if p.self.GetAddr() == addr && !p.self.IsCandidate(){
 		p.self.role = CANDIDATE
 		return true
+	}else if p.self.IsCandidate() && newCandidateAssigned{
+		p.self.role = MEMBER
 	}
-	return false
+	return newCandidateAssigned
 }
 
 func (p *PeerRouting) BecomeLeader(){
@@ -222,6 +225,12 @@ func (p *PeerRouting) MakeLeader(addr string) bool{
 		peer.role = LEADER
 		log.Println(addr,"ASSIGNED AS LEADER")
 		return true
+	}
+	if p.self.GetAddr() == addr{
+		p.self.role = LEADER
+		log.Println("SELF ASSIGNED AS LEADER")
+		return true
+		
 	}
 	log.Println("NOT ASSIGNED AS LEADER, addr:",addr)
 	return false

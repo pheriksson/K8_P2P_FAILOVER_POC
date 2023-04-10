@@ -14,17 +14,25 @@ import (
 )
 
 const (
+	// Time intervall for leader to send heartbeats to peers.
 	HEARTBEAT_FREQ = 5
+	// Multiplier for how many heartbeat intervalls members are supposed to wait for leader updates.
 	HEARTBEAT_TIMEOUT_VALID_MULTIPLIER = 5 
+	// Time in secconds of the leader timeout range for members to await health pings.
 	TTL_TIMEOUT_SECONDS = HEARTBEAT_FREQ*HEARTBEAT_TIMEOUT_VALID_MULTIPLIER
+	// Time for member/candidate running for leader should wait for confirmed votes by other peers. 
 	TIME_SEC_SEND_LEADER_ELECTION = 5
-	// TTL_TIMEOUT_SECONDS = Num pings send by leader before timeout is valid
-	TIME_SEC_AWAIT_CANDIDATE_CONFIRMATION = 2
+	// Time intervall for leader to send volumes to candidate.
 	TIME_SEC_SEND_VOLUME_CANDIDATE = 20
 	TESTING_PORT = 9999
+	// Time for leader to await response from candidate of confirming a candidency under self as leader.
 	TIME_SEC_AWAIT_CANDIDATE_RESPONSE = 10
+	// Time for leader to await resposne from candidate confirming volume transfer
+	TIME_SEC_AWAIT_CANDIDATE_VOLUME_CONFIRMATION = 30
+	// Random timeout range for members awaiting other member running for leader. 
+	RANDOM_TIMEOUT_RANGE_MEMBER_MS = 10000
+	// Static string used as placeholder for packets (verbose msg)
 	MISSING_CANDIDATE_STRING = "TBD"
-	RANDOM_NUMBER_RANGE = 6000
 )
 
 
@@ -77,7 +85,7 @@ func InitPoC(ip string, port int) *PoC{
 		startEarlyFailover: make(chan bool),
 		runningElectionMut: sync.Mutex{},
 		runningElection : false,
-		r: rand.Intn(RANDOM_NUMBER_RANGE),
+		r: rand.Intn(RANDOM_TIMEOUT_RANGE_MEMBER_MS),
 	}
 	return &p
 }
@@ -138,7 +146,6 @@ func (p *PoC) requestLeaderVotes(incTerm int) bool{
 	numVotes := 0
 	members := p.peers.GetPeersAddress()
 	for{
-		// Send out all request replies.
 		p.sendRequestLeaderVotes(members, p.peers.GetTerm())
 		select{
 		case <-p.leaderVote:
@@ -190,13 +197,13 @@ func (p *PoC) listenLeader(heartbeatTimeout time.Duration){
 		p.roleLog("HB EXPECTED IN:"+nextHeartbeatTimeout.String())
 		p.listenLeader(nextHeartbeatTimeout)
 	case <-p.oldTerm:
-		p.roleLog("NEW TERM REACHED")
+		p.roleLog("NEW TERM")
 		if p.peers.BecomeMember(p.peers.GetTerm()){
 			p.roleLog("DEMOTED TO MEMBER")
 		}
 		return
 	case <- p.startEarlyFailover:
-		p.roleLog("<<---- TODO: INSERT EARLY FAILOVER")
+		p.roleLog("<<---- TODO: INSERT EARLY FAILOVER ---->>")
 		if (p.peers.GetRole() == CANDIDATE){
 			p.awaitKubernetesCluster()
 			return
@@ -277,10 +284,10 @@ func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartb
 				stopHeartbeat<-true	
 				return
 			}
-			p.roleLog("TODO: SEND VOLUME TO CANDIDATE:"+ candAddr)	
+			p.roleLog("<----- TODO: SEND VOLUME TO CANDIDATE:"+ candAddr+ " ------>")	
 			select{
-				case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE):
-					p.roleLog("TIMEOUT RESPONSE OF VOLUME - ASSUMING CANDIDATE DEAD")
+				case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_VOLUME_CONFIRMATION):
+					p.roleLog(" <----------- TIMEOUT RESPONSE OF VOLUME - ASSUMING CANDIDATE DEAD ---------->")
 					stopHeartbeat<- true
 					return
 				case <-p.candidateVolumeConfirmation:
@@ -294,16 +301,12 @@ func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartb
 
 }
 
-// REFACTOR: send to altered raft api if packet labeled as raft rpc. 
 func (p *PoC) handleRequest(packet network.Packet){
 	callerAddrs := packet.Caller.IP.String()
 	if !p.peers.IsPeer(callerAddrs){
 		p.roleLog("UNKNOWN PEER REQUEST - ["+callerAddrs+"]"+" PACKET TYPE:"+packet.Type.ToString())
 		return
 	}
-	// TODO: BUG when leader joins quickly from disconnecting (as member), will start to ping for election ()
-	// And other will register as current leader pinging, but infact prev leader is out of sync and dead (as in member starte).
-	// Can be recovered by candidate pinging leader for confirmation, or simply move updateTTL for every request.
 	err := p.peers.UpdateTTL(callerAddrs)
 	if err != nil{
 		p.roleLog("FAILED TO UPDATE TTL FOR :"+callerAddrs+ " (NO ENTRY)")
@@ -317,12 +320,13 @@ func (p *PoC) handleRequest(packet network.Packet){
 		go func(){
 			log.Println()
 			p.roleLog("RAFT_VOTE_LEADER - RECIEVED: "+fmt.Sprintf("%#v",val))
-
 			if p.checkTerm(val.Term, val.LeaderAddr){
-				// New term, meaning only possible msg is a request to become leader.
-				// If we we're in leader selection, send signal to abort leader
-                                p.roleLog("HIGHER TERM")
-				p.sendReplyLeaderVote()
+				// New term, meaning only possible packet is a request to become leader.
+				if val.LeaderAddr != p.peers.GetAddr(){
+					// Used to handle edge case response from Case (1) when a response is returned to self 
+					// TODO Assert that k8 cluster is active
+					p.sendReplyLeaderVote()
+				}
 				return
 			}
 			if val.Term == p.peers.GetTerm() && val.Agreed && val.LeaderAddr == p.peers.GetAddr() {
@@ -331,10 +335,19 @@ func (p *PoC) handleRequest(packet network.Packet){
 				p.leaderVote <- 1
 				return
 			}
+			currLeader, err := p.peers.GetLeaderAddr()
+			currCand, err := p.peers.GetCandidateAddress()
+			if val.Term < p.peers.GetTerm() && !val.Agreed && val.LeaderAddr == currLeader{
+				// Case (1) leader disconnect but rejoined within timeout and is still recognized as leader by the members of the cluster (but sees self as lower term.). Send MSG to leader to check if still runnign active deployment and if yes, retake role as leader with current set term.
+				// Case only used for catching up a "lost" leader who's still running the deployment with the rest of the cluster.
+				p.sendReplyLeaderVote()
+				return
+
+
+			}
 			// Case same term or lower -> if same term, and val agreed == false (they're requesting we vote for them).
 			// Same term but caller is candidate -> accept vote. 
-			candAddr, err := p.peers.GetCandidateAddress()
-			if err == nil && val.Term == p.peers.GetTerm() && p.peers.self.IsMember() && !val.Agreed && val.LeaderAddr == candAddr{ 
+			if err == nil && val.Term == p.peers.GetTerm() && p.peers.self.IsMember() && !val.Agreed && val.LeaderAddr == currCand{ 
                                 p.roleLog("ASS MEMBER, GOT REQUEST TO VOTE ON PREVIOUSLY CONFIRMED CANDIDATE IN SAME TERM. -> ABORT OWN REQ LEADER.")
 				p.peers.MakeLeader(val.LeaderAddr)
 				p.oldTerm<-val.Term
@@ -352,7 +365,7 @@ func (p *PoC) handleRequest(packet network.Packet){
 			p.roleLog("RAFT_VOTE_CANDIDATE - RECIEVED: "+fmt.Sprintf("%#v",val))
 			if p.checkTerm(val.Term, val.LeaderAddr){
 				// No write to candidate promotion as oldTerm channel arldy written to by checkterm. 
-				p.roleLog("RECIEVED REQUEST TO BECOME CANDIDATE ON NEWER TERM - ACCEPT.")
+				p.roleLog("RECIEVED REQUEST TO BECOME CANDIDATE ON NEWER TERM - ACCEPT AND AWAIT CONF.")
 				p.sendReplyCandidateVote()
 			}
 			if (val.Term == p.peers.GetTerm()){
@@ -377,13 +390,13 @@ func (p *PoC) handleRequest(packet network.Packet){
 		}
 		go func(){
 			p.roleLog("RAFT_HEALTH - RECIEVED: "+fmt.Sprintf("%#v",val))
-			// NOTE: Ordering matters here, p.checkTerm needs to be on the LHS of OR expression.
+			// NOTE: Ordering matters, p.checkTerm needs to be on the LHS of expression.
 			if (p.checkTerm(val.Term, val.LeaderAddr) || val.Term == p.peers.GetTerm()){
 				if (p.peers.MakeCandidate(val.CandidateAddr)){
-					p.roleLog("NEW ADDRESS REGISTERED FOR: CANDIDATE")
+					p.roleLog("NEW ADDRESS REGISTERED FOR CANDIDATE: "+val.CandidateAddr)
 				}
 				if (!val.Stable && p.peers.GetRole() == CANDIDATE){
-					p.roleLog("UNSTABLE LEADER - BECOME LEADER EARLY.")
+					p.roleLog("UNSTABLE LEADER - AS CANDIDATE BECOME LEADER EARLY.")
 					p.startEarlyFailover <- true
 				}
 			}
@@ -391,14 +404,15 @@ func (p *PoC) handleRequest(packet network.Packet){
 	}
 }
 
+// pre: new term and new leader addr corresponding to term.
+// post: If new term - state change for all roles becoming members.
 func (p *PoC) checkTerm(newTerm int, leaderAddr string) bool{
 	p.oldTermMut.Lock()
 	defer p.oldTermMut.Unlock()
 	if newTerm > p.peers.GetTerm(){
 		p.peers.BecomeMember(newTerm)
 		p.peers.MakeLeader(leaderAddr)
-		p.roleLog("NEW TERM:"+strconv.Itoa(newTerm))
-		p.roleLog("NEW LEADER:"+leaderAddr)
+		p.roleLog("NEW TERM: "+strconv.Itoa(newTerm)+" AND LEADER: "+ leaderAddr)
 		p.oldTerm <- newTerm
 		return true 
 	}
