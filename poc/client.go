@@ -24,7 +24,7 @@ const (
 	TIME_SEC_SEND_LEADER_ELECTION = 5
 	// Time intervall for leader to send volumes to candidate.
 	TIME_SEC_SEND_VOLUME_CANDIDATE = 20
-	TESTING_PORT = 9999
+	MODIFIED_RAFT_PORT = 9999
 	// Time for leader to await response from candidate of confirming a candidency under self as leader.
 	TIME_SEC_AWAIT_CANDIDATE_RESPONSE = 10
 	// Time for leader to await resposne from candidate confirming volume transfer
@@ -48,12 +48,11 @@ type PoC struct{
 	kube		*kube.KubeClient	
 	kubeChan	chan string
 	net		*network.Network
-	netChan		<-chan network.Packet
+	netChan		<-chan network.RPC
 	cli		string
 	cliChan		<-chan	string 
 	peers		*PeerRouting
 	role		RaftStatus	
-	// Catch all chan used to catch any further terms.
 	oldTerm		chan int
 	oldTermMut	sync.Mutex
 	leaderVote	chan int
@@ -69,7 +68,7 @@ type PoC struct{
 
 
 func InitPoC(ip string, port int) *PoC{
-	nch := make(chan network.Packet)
+	nch := make(chan network.RPC)
 	n := network.InitNetwork(ip, port, nch)
 	p := PoC{kubeChan: make(chan string),
 		net: n,
@@ -144,11 +143,25 @@ func (p *PoC) requestLeaderVotes(incTerm int) bool{
 	p.roleLog("STARTING LEADER FOR TERM:+"+strconv.Itoa((p.peers.GetTerm()+incTerm)))
 	p.peers.RaiseTerm(incTerm)
 	numVotes := 0
+	aggChan := make(chan network.Packet)
 	members := p.peers.GetPeersAddress()
+	for _, peer := range members{
+		go func(pr string, term int){
+			if pr != "" {
+			err, respChannel := p.sendRequestLeaderVotes(pr, term)
+			if err != nil{
+        	                p.roleLog("FAILED TO SEND LEADER VOTE REQUEST TO "+pr)
+			        return
+			}
+        	        p.roleLog("SUCCESFULLY SENT LEADER VOTE REQUEST TO "+pr)
+			peerVote := <-respChannel
+			aggChan <- peerVote
+			}
+		}(peer, p.peers.GetTerm())
+	}
 	for{
-		p.sendRequestLeaderVotes(members, p.peers.GetTerm())
 		select{
-		case <-p.leaderVote:
+		case <-aggChan:
 			numVotes+= 1
 		        p.roleLog("RECIEVED ANOTHER VOTE, TOTAL:"+strconv.Itoa(numVotes))
 			if (numVotes >= p.quorum){
@@ -173,7 +186,6 @@ func (p *PoC) requestLeaderVotes(incTerm int) bool{
 
 // Watch for leader activity - return on inactive leader/promotion to candidate.
 func (p *PoC) watchLeader() (error){
-	p.roleLog("TRYING TO WATCH LEADER")
 	leaderTTL, err := p.peers.GetLeaderTimeout()
 	if err != nil{
 		p.roleLog("NO VALID LEADER ELECTED.")
@@ -205,6 +217,7 @@ func (p *PoC) listenLeader(heartbeatTimeout time.Duration){
 	case <- p.startEarlyFailover:
 		p.roleLog("<<---- TODO: INSERT EARLY FAILOVER ---->>")
 		if (p.peers.GetRole() == CANDIDATE){
+		
 			p.awaitKubernetesCluster()
 			return
 		}
@@ -232,29 +245,38 @@ func (p *PoC) assignCandidate(abort chan bool) bool{
 	for _, peer := range allPeers{
 		if (peer == ""){continue}
 		p.roleLog("SEND BECOME CANDIDATE TO CAND:"+peer)
-		p.sendRequestCandidateVote(peer) 
+		err, candResp := p.sendRequestCandidateVote(peer) 
+		if err != nil{
+			time.Sleep(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE)
+			continue
+		}
 		select{
 		case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_RESPONSE):
 		        p.roleLog("FAILED TO GET CONFIRMATION FROM: "+peer)	
-		case confirmed :=<-p.candidatePromotionConfirmed:
-			if confirmed == peer{
-		                // Here bug with two members believign they're candidates.
-				p.roleLog("GOT CANDIDATE CONFIRMATION FROM: "+confirmed)
-				p.peers.MakeCandidate(confirmed)
-				return true	
+		case confirmed :=<-candResp:
+			data, err := decodePayload[VoteCandidate](confirmed.Data)
+			if err != nil {
+                	     log.Println("ERROR DECODING FOR ASSIGN CANDIDATE")
+			}
+			if data.Agreed && peer == data.CandidateAddr{
+					p.roleLog("GOT CANDIDATE CONFIRMATION FROM: "+data.CandidateAddr)
+					p.peers.MakeCandidate(data.CandidateAddr)
+					return true	
+
 			}
 		case <-abort:
-			log.Println("Aborting candidate selection due to hearbeat notification of new term.")
+			p.roleLog("ABORTING CANDIDATE PROMOTION")
 			return false
 		}
 	}
-	p.roleLog("CYCLED THROUGH ALL MEMBERS, RESTARTING CYCLING.")
+	p.roleLog("CHECKED WITH ALL MEMBERS - RESTARTING CANDIDATE SELECTION")
 	return p.assignCandidate(abort)
 
 }
 
 
 // TODO: Unhealthy cluster. Notfiy leader of promoting candidate.
+// NOTE: No changes.
 func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool, stopHeartbeat <-chan bool){
 	members := p.peers.GetPeersAddress()
 	for{
@@ -301,7 +323,8 @@ func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartb
 
 }
 
-func (p *PoC) handleRequest(packet network.Packet){
+func (p *PoC) handleRequest(rpc network.RPC){
+	packet := rpc.GetPacket()
 	callerAddrs := packet.Caller.IP.String()
 	if !p.peers.IsPeer(callerAddrs){
 		p.roleLog("UNKNOWN PEER REQUEST - ["+callerAddrs+"]"+" PACKET TYPE:"+packet.Type.ToString())
@@ -325,33 +348,13 @@ func (p *PoC) handleRequest(packet network.Packet){
 				if val.LeaderAddr != p.peers.GetAddr(){
 					// Used to handle edge case response from Case (1) when a response is returned to self 
 					// TODO Assert that k8 cluster is active
-					p.sendReplyLeaderVote()
+					p.sendReplyLeaderVote(rpc.Done)
 				}
 				return
 			}
-			if val.Term == p.peers.GetTerm() && val.Agreed && val.LeaderAddr == p.peers.GetAddr() {
-				// Same term/ Agreed / Packet has self as leader -> we're requesting the vote.
-				p.roleLog("AS MEMBER - GOT VOTE.")
-				p.leaderVote <- 1
-				return
-			}
-			currLeader, err := p.peers.GetLeaderAddr()
-			currCand, err := p.peers.GetCandidateAddress()
+			currLeader, _ := p.peers.GetLeaderAddr()
 			if val.Term < p.peers.GetTerm() && !val.Agreed && val.LeaderAddr == currLeader{
-				// Case (1) leader disconnect but rejoined within timeout and is still recognized as leader by the members of the cluster (but sees self as lower term.). Send MSG to leader to check if still runnign active deployment and if yes, retake role as leader with current set term.
-				// Case only used for catching up a "lost" leader who's still running the deployment with the rest of the cluster.
-				p.sendReplyLeaderVote()
-				return
-
-
-			}
-			// Case same term or lower -> if same term, and val agreed == false (they're requesting we vote for them).
-			// Same term but caller is candidate -> accept vote. 
-			if err == nil && val.Term == p.peers.GetTerm() && p.peers.self.IsMember() && !val.Agreed && val.LeaderAddr == currCand{ 
-                                p.roleLog("ASS MEMBER, GOT REQUEST TO VOTE ON PREVIOUSLY CONFIRMED CANDIDATE IN SAME TERM. -> ABORT OWN REQ LEADER.")
-				p.peers.MakeLeader(val.LeaderAddr)
-				p.oldTerm<-val.Term
-				p.sendReplyLeaderVote()
+				p.sendReplyLeaderVote(rpc.Done)
 				return
 			}
 		}()
@@ -366,19 +369,16 @@ func (p *PoC) handleRequest(packet network.Packet){
 			if p.checkTerm(val.Term, val.LeaderAddr){
 				// No write to candidate promotion as oldTerm channel arldy written to by checkterm. 
 				p.roleLog("RECIEVED REQUEST TO BECOME CANDIDATE ON NEWER TERM - ACCEPT AND AWAIT CONF.")
-				p.sendReplyCandidateVote()
+				p.sendReplyCandidateVote(rpc.Done)
+				return
 			}
 			if (val.Term == p.peers.GetTerm()){
-				// Same term, leader requesting candidate, or leader recieving response.  
+				// Same term, leader requesting candidate. 
 				lAddr, err := p.peers.GetLeaderAddr()
 				if val.LeaderAddr == lAddr && err == nil && !val.Agreed{ 
 					// Candidate responding on same term
-					p.sendReplyCandidateVote()
+					p.sendReplyCandidateVote(rpc.Done)
 					return
-				}
-				if lAddr == p.peers.GetAddr() && val.Agreed{
-					// Leader recieving confirmation
-					p.candidatePromotionConfirmed <- val.CandidateAddr
 				}
 			}
 		}()
@@ -439,29 +439,25 @@ func (p *PoC) sendLeaderPings(peers []string){
 	for _, peer := range peers{
 		if peer == "" {continue}
 		p.roleLog("SENDING PING TO: "+peer)
-		p.sendRequest(peer, rpcPayload, network.RAFT_HEALTH)	
+		p.sendRequest(peer, rpcPayload, network.RAFT_HEALTH)
 	}
 }
 
-func (p *PoC) sendRequestLeaderVotes(peers []string, newTerm int){
+func (p *PoC) sendRequestLeaderVotes(peer string, newTerm int) (error, chan network.Packet){
 	rpcPayload, err := encodePayload(VoteLeader{
 		Term: newTerm,
 		LeaderAddr: p.peers.GetAddr(),
 		Agreed: false,
 	})
 	if err != nil{
-		log.Println("FAILED TO ENCODE LEADER REQUEST")
+		return fmt.Errorf("FAILED TO ENCODE LEADER REQUEST"), make(chan network.Packet)
 	}
-	for _, peer := range peers{
-		if peer == "" {continue}
-		p.roleLog("SENDING VOTE REQUEST TO:"+peer)
-		p.sendRequest(peer, rpcPayload, network.RAFT_VOTE_LEADER)
-	}
+	p.roleLog("SENDING VOTE REQUEST TO:"+peer)
+	return p.sendRequestAwaitResponse(peer, rpcPayload, network.RAFT_VOTE_LEADER)
 }
 
-func (p *PoC) sendReplyLeaderVote() {
+func (p *PoC) sendReplyLeaderVote(replyChannel chan<- []byte) {
 	leaderAddr, err := p.peers.GetLeaderAddr() 
-	p.roleLog("SEND REPLY LEADER VOTE, CURRENT LEADER:"+leaderAddr)
 	if err != nil{
 		p.roleLog("NO LEADER TO BE FOUND"+err.Error())
 	}
@@ -473,10 +469,10 @@ func (p *PoC) sendReplyLeaderVote() {
 	if err != nil{
 		log.Println("FAILED TO ENCODE LEADER REPLY")
 	}	
-	p.sendRequest(leaderAddr, rpcPayload, network.RAFT_VOTE_LEADER )
+	p.roleLog("SENDING REPLY LEADER VOTE, CURRENT LEADER:"+leaderAddr)
+	sendEncodedReply(leaderAddr, rpcPayload, network.RAFT_VOTE_LEADER, replyChannel)
 }
-
-func (p *PoC) sendReplyCandidateVote() error{
+func (p *PoC) sendReplyCandidateVote(replyChannel chan<- []byte) {
 	leaderAddr, _ := p.peers.GetLeaderAddr()
 	rpcPayload, err := encodePayload(VoteCandidate{
 		Term: p.peers.self.GetTerm(),
@@ -487,11 +483,11 @@ func (p *PoC) sendReplyCandidateVote() error{
 	if err != nil{
 		log.Println("FAILED TO ENCODE LEADER REPLY")
 	}	
-	p.sendRequest(leaderAddr, rpcPayload, network.RAFT_VOTE_CANDIDATE)
-	return nil
+	p.roleLog("SENDING REPLY ACCEPTING CANDIDATE VOTE")
+	sendEncodedReply(leaderAddr, rpcPayload, network.RAFT_VOTE_CANDIDATE, replyChannel)
 }
 
-func(p *PoC) sendRequestCandidateVote(candidate string) error{
+func(p *PoC) sendRequestCandidateVote(candidate string) (error, chan network.Packet){
 	rpcPayload, err := encodePayload(VoteCandidate{
 		Term: p.peers.GetTerm(),
 		LeaderAddr: p.peers.GetAddr(),
@@ -499,27 +495,42 @@ func(p *PoC) sendRequestCandidateVote(candidate string) error{
 		Agreed: false,
 	})
 	if err != nil {
-		return err
+		log.Println("FAILED TO ENCODE PAYLOAD FOR sendRequestCandidateVote")
 	}
-	// NOTE: Assign port on init
-	p.sendRequest(candidate, rpcPayload, network.RAFT_VOTE_CANDIDATE)
-	return nil
+        return 	p.sendRequestAwaitResponse(candidate, rpcPayload, network.RAFT_VOTE_CANDIDATE)
+}
+func (p *PoC) sendRequestAwaitResponse(targetAddr string, payload []byte, dt network.DataType) (error, chan network.Packet){
+	return p.net.SendRequestAwaitResponse(&net.TCPAddr{IP: net.ParseIP(targetAddr), Port: MODIFIED_RAFT_PORT}, payload, dt)
 }
 
+func (p *PoC) sendRequest(targetAddr string, payload []byte, dt network.DataType){
+	err := p.net.SendRequest(&net.TCPAddr{IP: net.ParseIP(targetAddr), Port: MODIFIED_RAFT_PORT}, payload, dt)
+	if err != nil{
+		p.roleLog("FAILED TO SEND REQUEST OF TYPE:["+dt.ToString()+"] TO PEER: ["+targetAddr+"]")
+	}
+}
 
-func(p *PoC) sendRequest(targetAddr string, payload []byte, dt network.DataType) {
-	p.net.SendRequest(&net.UDPAddr{IP: net.ParseIP(targetAddr), Port: TESTING_PORT}, payload, dt)
+func sendEncodedReply(targetAddr string, payload []byte, dt network.DataType, ch chan<- []byte) {
+	packet := network.NewPacket(&net.TCPAddr{IP: net.ParseIP(targetAddr), Port:MODIFIED_RAFT_PORT}, payload, dt) 
+	encPacket, err := network.Encode(*packet) 
+	if err != nil{
+		log.Printf("FAILED TO ENCODE PACKET ADDRESSED TO %s", targetAddr)
+	}
+        go func(){
+		ch <- encPacket
+	}()
+
 }
 
 
 func (p *PoC) StartPoc(){
 	go p.net.Listen()
-	go p.startModifiedRAFT()
+	go func(){time.Sleep(time.Second); p.startModifiedRAFT()}()
 	t := 0
 	for{
 		select{
-		case incPacket := <-p.netChan:
-			go p.handleRequest(incPacket)
+		case incRPC := <-p.netChan:
+			go p.handleRequest(incRPC)
 		case <-time.After(time.Second):
 			t+=1	
 			fmt.Println(t,"(S) PASSED IN MAIN POC")

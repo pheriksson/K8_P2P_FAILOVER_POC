@@ -8,7 +8,7 @@ import (
 )
 
 type Packet struct {
-	Caller *net.UDPAddr
+	Caller *net.TCPAddr
 	Data   []byte
 	Type DataType
 }
@@ -41,7 +41,7 @@ func (d DataType) ToString() string{
 
 }
 
-func NewPacket(c *net.UDPAddr, data []byte, dt DataType) *Packet{
+func NewPacket(c *net.TCPAddr, data []byte, dt DataType) *Packet{
 	p := Packet{Caller: c, Data: data, Type: dt}
 	return &p
 }
@@ -54,7 +54,6 @@ func Encode(p Packet) ([]byte, error){
 		log.Printf("ENCODE ERROR: %s",err)
 		return nil, nil
 	}
-
 	byteBuff := make([]byte, 2048)
 	n, _ := buffer.Read(byteBuff);
 	return byteBuff[:n], nil
