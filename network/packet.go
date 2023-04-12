@@ -13,6 +13,10 @@ type Packet struct {
 	Type DataType
 }
 
+const(
+	PACKET_SIZE = 2048
+)
+
 type DataType int
 
 const(
@@ -40,7 +44,7 @@ func (d DataType) ToString() string{
 
 
 }
-
+// TODO: Error if packet somehow exceds limited packet size.
 func NewPacket(c *net.TCPAddr, data []byte, dt DataType) *Packet{
 	p := Packet{Caller: c, Data: data, Type: dt}
 	return &p
@@ -54,7 +58,7 @@ func Encode(p Packet) ([]byte, error){
 		log.Printf("ENCODE ERROR: %s",err)
 		return nil, nil
 	}
-	byteBuff := make([]byte, 2048)
+	byteBuff := make([]byte, PACKET_SIZE)
 	n, _ := buffer.Read(byteBuff);
 	return byteBuff[:n], nil
 }

@@ -25,6 +25,7 @@ const (
 	// Time intervall for leader to send volumes to candidate.
 	TIME_SEC_SEND_VOLUME_CANDIDATE = 20
 	MODIFIED_RAFT_PORT = 9999
+	MODIFIED_RAFT_PORT_FILE_TRANSFER = 9998
 	// Time for leader to await response from candidate of confirming a candidency under self as leader.
 	TIME_SEC_AWAIT_CANDIDATE_RESPONSE = 10
 	// Time for leader to await resposne from candidate confirming volume transfer
@@ -47,6 +48,7 @@ const (
 type PoC struct{
 	kube		*kube.KubeClient	
 	kubeChan	chan string
+	kubeVolumes     chan []string
 	net		*network.Network
 	netChan		<-chan network.RPC
 	cli		string
@@ -69,7 +71,7 @@ type PoC struct{
 
 func InitPoC(ip string, port int) *PoC{
 	nch := make(chan network.RPC)
-	n := network.InitNetwork(ip, port, nch)
+	n := network.InitNetwork(ip, port, MODIFIED_RAFT_PORT_FILE_TRANSFER, nch)
 	p := PoC{kubeChan: make(chan string),
 		net: n,
 		netChan: nch,
@@ -293,7 +295,7 @@ func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool,
 	}
 	}
 }
-
+// Need to check for go-routine memory leaks.
 func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartbeat chan bool){
 	p.roleLog("INITIATING PERSISTENT VOLUME WINDOW TRANSFER")
 	for{
@@ -301,19 +303,25 @@ func (p *PoC) startVolumeWindowCandidate(stopFromHeartbeat chan bool, stopHeartb
 		case <-time.After(time.Second*TIME_SEC_SEND_VOLUME_CANDIDATE):
 			candAddr, err := p.peers.GetCandidateAddress()
 			if err != nil{
-				// Invalid leader state - missing candidate. 
 				p.roleLog("INVALID STATE: MISSING CANDIDATE")
 				stopHeartbeat<-true	
 				return
 			}
-			p.roleLog("<----- TODO: SEND VOLUME TO CANDIDATE:"+ candAddr+ " ------>")	
+			//TODO: implement kube cntrller 'volumes := p.kube.GetLatestVolumesPaths()' 
+			TBD_GET_FUNCION := []string{"3gb_file.txt","9gb_file.txt"}
+			abortVolume := make(chan bool, len(TBD_GET_FUNCION))
+			volumesSent := p.sendCandidatePrepareVolumeTransfer(candAddr, TBD_GET_FUNCION, abortVolume)
 			select{
 				case <-time.After(time.Second*TIME_SEC_AWAIT_CANDIDATE_VOLUME_CONFIRMATION):
-					p.roleLog(" <----------- TIMEOUT RESPONSE OF VOLUME - ASSUMING CANDIDATE DEAD ---------->")
+					for n := 0; n < len(TBD_GET_FUNCION); n++ {abortVolume <- true}	
 					stopHeartbeat<- true
 					return
-				case <-p.candidateVolumeConfirmation:
-					p.roleLog("RECIEVED CAND CONFIRMATION OF VOLUME")
+				case transferStatus := <-volumesSent:
+					if transferStatus {
+						p.roleLog("CANDIDATE CONFIRMED SUCCESFULL VOLUME TRANSFER")
+					}else{
+						p.roleLog("FAILED VOLUME TRANSFER TO CANDIDATE")
+					}
 			}	
 		case <-stopFromHeartbeat:
 			// New term recieved.
@@ -522,6 +530,46 @@ func sendEncodedReply(targetAddr string, payload []byte, dt network.DataType, ch
 
 }
 
+// TODO: Look for leaking 
+func (p *PoC) sendCandidatePrepareVolumeTransfer(targetIp string,filePaths []string, abort <-chan bool) (chan bool){
+	done := make(chan bool)
+	// Make space for confirmed transmissions
+	confirmedTransmissions := make(chan bool, len(filePaths))
+	target := &net.TCPAddr{IP:net.ParseIP(targetIp), Port: MODIFIED_RAFT_PORT_FILE_TRANSFER}
+	for _, file := range filePaths{
+		go func(target *net.TCPAddr, filePath string, abort <-chan bool){
+			p.roleLog("SENDING VOLUME: ["+filePath+"]")
+			status := p.net.SendLargeFile(target, filePath)
+			select{
+		        case <-abort:
+				p.roleLog("RECIEVED ABORT SIGNAL IN VOLUME TRANSMISSION FOR VOLUME: ["+filePath+"]")
+				return
+			case s := <-status:
+				if s {
+					confirmedTransmissions <- true
+					p.roleLog("SUCCESFULLY SENT VOLUME: ["+filePath+"]")
+				}else{
+					confirmedTransmissions <- false
+					p.roleLog("FAILED TO SEND VOLUME: ["+filePath+"]")
+				}
+			}
+		}(target, file, abort)
+	}
+	go func(n int){
+		// Need to pass n succesfull transmissions.
+		for i := 0; i < n; i++{
+			status:= <-confirmedTransmissions
+			if !status{
+				p.roleLog("ABORTING TRANSMISSION")
+				done<-false
+			}
+
+		}
+		done<-true
+
+	}(len(filePaths))
+	return done
+}
 
 func (p *PoC) StartPoc(){
 	go p.net.Listen()

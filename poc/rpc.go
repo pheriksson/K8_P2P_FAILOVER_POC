@@ -28,14 +28,24 @@ type Health struct{
 	CandidateAddr string
 	Stable	bool
 }
-
-type RequestVolumes struct{
+// TODO: Implement for volumes so correct volume identity can be established.  
+type PersistentVolumes struct{
 	Term int
+	LeaderAddr string
+	CandidateAddr string
+	VolumeType string
+	VolumeId string
+	VolumeSize int64
+	Complete bool
 }
 
 type Payload interface {
-	VoteLeader | VoteCandidate | Health | RequestVolumes
+	VoteLeader | VoteCandidate | Health | PersistentVolumes
 }
+
+const (
+	MAX_RPC_SIZE = 2048
+)
 
 func decodePayload[T Payload](rawPacket []byte) (T, error){
 	buffer := bytes.NewBuffer(rawPacket)
@@ -58,7 +68,7 @@ func encodePayload[T  Payload](structInstance T) ([]byte, error){
 		log.Printf("ENCODE ERROR: %s",err)
 		return nil, nil
 	}
-	byteBuff := make([]byte, 2048)
+	byteBuff := make([]byte, MAX_RPC_SIZE)
 	n, _ := buffer.Read(byteBuff);
 	return byteBuff[:n], nil
 }
