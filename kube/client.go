@@ -7,9 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"time"
-
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	//"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -22,19 +20,36 @@ const (
 	NODE_NETWORK_KEY = "NetworkUnavailable"
 	NODE_NETWORK_HEALTHY_KEY = "True"
 	TIME_SEC_HEALTH_CHECK = 10
+	TIME_SEC_ANNOUNCE_SERVICES = 10
 	ETCD_SNAPSHOT_FILENAME = "etcd_snapshot.db"
 )
-// Need proxy server aswell to send general purpose packets to active kubernetes.
-// That way routing wont become a problem.
 
 type KubeClient struct{
-	clusterInput chan string
-	pocCommands chan string // 
-	earlyFailover chan bool
+	activeCluster bool 
+	fromPoc <-chan KubeMsg
+	toPoc chan<- KubeMsg 
 	cluster *kubernetes.Clientset
+	activeNodes []string
+	announceNodes chan<-[]string
+	activePorts []int
+	announcePorts chan<-[]int
 }
 
-func InitKubeClient(confPath string, failover chan bool) *KubeClient{
+type KubeMsg int
+
+const(
+	START_CLUSTER KubeMsg = iota
+	STOP_CLUSTER
+	UNHEALTHY_CLUSTER
+	CONFIRM_EARLY_FAILOVER
+	PORT_ANNOUNCEMENT
+)
+
+// Need to address this stuff aswell
+type NodeAddress string
+type ServicePorts int
+
+func InitKubeClient(confPath string, nodeIpChan chan<-[]string, portChan chan<-[]int, fromPoc <-chan KubeMsg, toPoc chan<- KubeMsg) *KubeClient{
 	config, err := clientcmd.BuildConfigFromFlags("", confPath)
 	if err != nil{
 		log.Panic("FAILED TO INIT KUB CLUSTER CLIENT, REASON:", err)
@@ -43,64 +58,58 @@ func InitKubeClient(confPath string, failover chan bool) *KubeClient{
 	if err != nil{
 		log.Panic("FAILED TO INITATE KUB CLUSTER CLIENT. REASON:", err)
 	}
-	return &KubeClient{make(chan string), make(chan string), failover, cluster};
+	return &KubeClient{
+		activeCluster: false,
+		announceNodes: nodeIpChan,
+		announcePorts: portChan,
+		cluster: cluster,
+		fromPoc: fromPoc,
+		toPoc: toPoc,
+	};
 }
 
 
-
-
-// Used to get node ips for proxy.
-// So proxy server will query for node addresses.
-// Then on request to proxy, forward request to leader
-// Then on leader pick a random node and forward request to that node.
-// Complete. and then if failure, simply retry etc. 
-type NodeAddress string
-type ServicePorts int
-
-// GetNodeAddresses -> have proxy load balance on the random nodes.
-// GetServicePorts -> require to have valid service ports to all peers.
-
-// Note: For now only accepting nodePort svc. 
-func (k *KubeClient) GetClusterExternalPorts() (error, []ServicePorts){
+func (k *KubeClient) getClusterNodePorts() ([]int, error){
 	services, err := k.cluster.CoreV1().Services("").List(context.TODO(), v1.ListOptions{})
 	if err != nil{
 		logCluster("FAILED TO GET SERVICES, REASON: "+err.Error())
-		return err, []ServicePorts{}
+		return []int{}, err
 	}
+	svcPorts := make([]int, len(services.Items))
 	for _, svc := range services.Items{
-		// !ClusterIP -> 
 		if (svc.Spec.Type == "NodePort"){
-		log.Println(svc.Spec.Ports)
-		log.Println(svc.Spec.ExternalTrafficPolicy)
-
+			for _, port := range svc.Spec.Ports{
+				svcPorts = append(svcPorts, int(port.NodePort))
+			}
 		}
 	}
-	ports := make([]ServicePorts, len(services.Items))
-	return nil, ports 
+	return svcPorts, nil 
 }
 
 
 // For proxy, simply fetch addresses and service ports -> return to proxy and loadbalance.
-func (k *KubeClient) GetNodeAddresses() (error, NodeAddress){
+func (k *KubeClient) getClusterNodeAddresses() ([]string, error){
 	nodes ,err := k.cluster.CoreV1().Nodes().List(context.TODO(), v1.ListOptions{})
-	// 
-	for _, _ = range nodes.Items{
-		//for _, cond := range node.Status.Conditions{
-		//}
-	}
 	if err != nil{
 		logCluster("FAILED TO GET NODE, REASON: "+err.Error())
-		return err, ""
+		return []string{}, err 
 	}
-	log.Panic("TODO")
-	return nil, ""
+	nodeAddrs := make([]string, len(nodes.Items))
+	for _, node := range nodes.Items{
+		for _, nodeAddr  := range node.Status.Addresses{
+			if nodeAddr.Type == "InternalIP" {
+				nodeAddrs = append(nodeAddrs, nodeAddr.Address)
+			}
+		}
+	}
+	return nodeAddrs, nil
 }
 
 func (k *KubeClient) checkPodStatus(health chan bool){
 	// Will query all pods from ALL namespaces. 
 	pods, err := k.cluster.CoreV1().Pods("").List(context.TODO(), v1.ListOptions{})
 	if err != nil{
-		logCluster("FAILED TO GET PODSm REASON: "+err.Error())
+		logCluster("FAILED TO GET PODS REASON: "+err.Error())
 		health<- false
 		return
 	}
@@ -135,65 +144,107 @@ func (k *KubeClient) checkNodeStatus(health chan  bool){
 	logCluster(fmt.Sprintf("Healthy nodes: %d/%d",confirmedHealthy, len(nodes.Items)))
 	if confirmedHealthy == len(nodes.Items){health<- true} else {health<- false}
 }
+
 func (k *KubeClient) Start(){
-	// If etcd instance exists start from that, else start from init yaml.
 	log.Println("TODO: Start cluster operations.")
-	// Have channel to indicate failover. 
+	os.Exit(0)
 	// Stop conditions -> health checks start to fail -> init early failover and wait.
 	// Or abort from poc signaling new leader enroled  (self is not leader). 
-
+	// TODO: Send active nodes to proxy. Can be done by all the proxies to prepare.
+	k.saveImages()
+	func(){
+	time.Sleep(time.Second*3)
 	err := k.startCluster()
-	//TODO
-	//k.GetClusterExternalPorts()
-	//k.GetNodeAddresses()
+	if err != nil{
+		log.Println("FAILED TO START CLUSTER:",err)
+	}
+	}()
+	// Init proxy ports/nodes after succesfull restoration.
+	nodes, err := k.getClusterNodeAddresses()
+	if err != nil{
+		log.Panic("ERROR GETTING NODES: ",err)
+	}
+	go func(){k.announceNodes <- nodes}()
+
+	svcPorts, err := k.getClusterNodePorts()
+	if err != nil{
+		log.Panic("ERROR GETTING NODE PORTS: ",err)
+	}
+	go func(){k.announcePorts<-svcPorts}()
 	if err != nil{
 		log.Panic("CANNOT START CLUSTER, REASON: ",err)
 	}
-	os.Exit(0)
 	abort := make(chan bool)
 	clusterUnhealthy := k.startHealthChecks(abort)
 	for{
 		select{
 		case <-clusterUnhealthy:
 			log.Println("RECIEVED MSG OF UNHEALTHY CLUSTER.")
-		case <-time.After(time.Second*2):
-			log.Println("2 secconds passed without unhealthy cluster check")
+			k.toPoc<- UNHEALTHY_CLUSTER
+		// Need to organice communication from and to PoC.
+		case cmd := <-k.fromPoc:
+			log.Println("RECIEVED MSG FOR POC ", cmd)
+			k.handleMsg(cmd)
+		case <-time.After(time.Second):
+			log.Println("")
+		case <-time.After(time.Second*TIME_SEC_ANNOUNCE_SERVICES):
+			svcPorts, err := k.getClusterNodePorts()
+			if err != nil{
+				log.Panic("ERROR GETTING NODE PORTS: ",err)
+			}
+			go func(){
+				log.Println("ANNOUNCE CURRENT SERVICES TO PROXY SENDING TO PROXY:", svcPorts)
+				k.announcePorts<-svcPorts
+			}()
+			
 		}
 	}
-
-
 }
+
+func (k *KubeClient) handleMsg(cmd KubeMsg){
+	switch cmd{
+	case START_CLUSTER:
+		log.Println("TODO: CALL TO START CLUSTER AND RETURN OK WHEN START CONFIRMED.")
+	case STOP_CLUSTER:
+		log.Println("TODO: INSERT CALL TO STOP CLUSTER.")
+	default:
+		log.Println("RECIEVED DEFAULT TAG FOR HANDLEM;SG:", cmd)
+         }
+}
+
+
 func (k *KubeClient) saveImages(){
-	// Save etcd images etc and save localy the filepath to latest images.
-	// Send images to poc on request.  
 	script := "./kube/scripts/snapshot_etcd.sh"
-	cmd, err := exec.Command("/bin/bash", script, "192.168.38.111", ETCD_SNAPSHOT_FILENAME).Output()
+	_, err := exec.Command("/bin/bash", script).Output()
 	if err != nil{
-		log.Panic("ERROR ON CMD", err)
+		log.Panic("COULD NOT SAVE ETCD VOLUME, REASON:", err)
 	}
-	log.Println("SUCCESS WITH OUTPUT: " ,string(cmd[:]))
 }
 
-// Start cluster from etcd image or yaml init if no etcd image exists. 
+
 func (k *KubeClient) startCluster() error{
-	_, err :=  os.Open(ETCD_SNAPSHOT_FILENAME)
+	defaultSnapshotPath :="/tmp/poc/ETCD_VOLUME_BACKUP"
+	_, err :=  os.Open(defaultSnapshotPath)
 	if err != nil {
-		log.Println("No previously stored image exists")
+		log.Println("NO PREVIOUSLY STORED IMAGE")
 		return nil
 	}
+
 	script := "./kube/scripts/restore_etcd.sh"
-	cmd, err := exec.Command("/bin/bash", script, ETCD_SNAPSHOT_FILENAME).Output()
+	_, err = exec.Command("/bin/bash", script).Output()
 	if err != nil{
 		log.Panic("ERROR ON RESTORE ETCD SHELL", err)
 	}
-	log.Println("SUCCED RESTORE IMG WITH OUTPUT:", string(cmd[:]))
-
-	//k.cluster.AppsV1().RESTClient().Post().Body
 	log.Println("GOT CALL TO START CLUSTER.")
+	k.activeCluster = true
 	return nil
 }
 
+
 func (k *KubeClient) stopCluster(){
+	k.activeCluster = false
+	// Delete services.
+	// Delete deployments.
 	// Get confirmation from candidate (if possible) before complete stopage.
 	// Shutdown cluster. 
 }

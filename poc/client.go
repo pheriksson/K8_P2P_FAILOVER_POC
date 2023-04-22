@@ -5,12 +5,14 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/pheriksson/K8_P2P_FAILOVER_POC/kube"
 	"github.com/pheriksson/K8_P2P_FAILOVER_POC/network"
+	"github.com/pheriksson/K8_P2P_FAILOVER_POC/proxy"
 )
 
 const (
@@ -45,12 +47,16 @@ const (
 	MEMBER
 )
 
+
 type PoC struct{
 	kube		*kube.KubeClient	
-	kubeChan	chan string
+	fromKube	<-chan kube.KubeMsg
+	toKube		chan<- kube.KubeMsg
 	kubeVolumes     chan []string
 	net		*network.Network
 	netChan		<-chan network.RPC
+	proxy           *proxy.Proxy
+	proxyLeader	chan<- string
 	cli		string
 	cliChan		<-chan	string 
 	peers		*PeerRouting
@@ -65,17 +71,35 @@ type PoC struct{
 	runningElectionMut sync.Mutex
 	runningElection bool
 	quorum		int
-	r	int 
+	r		int 
 }
 
 
-func InitPoC(ip string, port int) *PoC{
+func InitPoC(ip string, port int, kubeConf string ) *PoC{
 	nch := make(chan network.RPC)
 	n := network.InitNetwork(ip, port, MODIFIED_RAFT_PORT_FILE_TRANSFER, nch)
-	p := PoC{kubeChan: make(chan string),
+
+	proxyLeaderChan := make(chan string)
+
+
+	kubPorts := make(chan []int)
+	kubNodes := make(chan []string)
+
+	pr := proxy.InitProxy(proxyLeaderChan , kubNodes, kubPorts, ip)
+
+	toKube := make(chan kube.KubeMsg)
+	fromKube := make(chan kube.KubeMsg)
+
+	k := kube.InitKubeClient(kubeConf, kubNodes, kubPorts,  toKube, fromKube)
+
+	p := PoC{
+		kube: k,
+		fromKube: fromKube,
+		toKube: toKube,
 		net: n,
 		netChan: nch,
 		peers: InitPeerRouting(ip),
+		proxy: pr,
 		role: MEMBER,
 		oldTerm: make(chan int),
 		oldTermMut: sync.Mutex{},
@@ -87,6 +111,7 @@ func InitPoC(ip string, port int) *PoC{
 		runningElectionMut: sync.Mutex{},
 		runningElection : false,
 		r: rand.Intn(RANDOM_TIMEOUT_RANGE_MEMBER_MS),
+		proxyLeader: proxyLeaderChan,
 	}
 	return &p
 }
@@ -169,7 +194,8 @@ func (p *PoC) requestLeaderVotes(incTerm int) bool{
 			if (numVotes >= p.quorum){
 				p.peers.BecomeLeader()
 				p.roleLog("NEW ROLE: LEADER")
-			        // Bootstrap one health check to init leader role.
+				p.proxyLeader<-p.peers.GetAddr()
+			        // Bootstrap leader pings before initing leader states.
 			        p.sendLeaderPings(p.peers.GetPeersAddress())
 				return true
 			}
@@ -217,9 +243,9 @@ func (p *PoC) listenLeader(heartbeatTimeout time.Duration){
 		}
 		return
 	case <- p.startEarlyFailover:
+		//
 		p.roleLog("<<---- TODO: INSERT EARLY FAILOVER ---->>")
 		if (p.peers.GetRole() == CANDIDATE){
-		
 			p.awaitKubernetesCluster()
 			return
 		}
@@ -227,19 +253,17 @@ func (p *PoC) listenLeader(heartbeatTimeout time.Duration){
 }
 
 func (p *PoC) awaitKubernetesCluster(){
-	p.kubeChan<-"START_CLUSTER"
+	p.toKube<-kube.START_CLUSTER
 	for{
 		select{
 		case <-time.After(time.Second):
 			log.Println("Awaiting k8 cluster takeover")	
-		case <- p.kubeChan:
-			log.Println("Got confirmation of cluster. Taking leader position.")
+		case msg := <-p.fromKube:
+			log.Println("RECIEVED MSG FROM K8 CLUSTER:", msg)
 			return
 		}
 	}
 }
-
-
 
 // Will only return on succesfull candidate confirmation or signal from heartbeat call that new term reached. 
 func (p *PoC) assignCandidate(abort chan bool) bool{
@@ -276,9 +300,8 @@ func (p *PoC) assignCandidate(abort chan bool) bool{
 
 }
 
-
+// TODO: Fix better logging.
 // TODO: Unhealthy cluster. Notfiy leader of promoting candidate.
-// NOTE: No changes.
 func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool, stopHeartbeat <-chan bool){
 	members := p.peers.GetPeersAddress()
 	for{
@@ -286,11 +309,11 @@ func (p *PoC) startHeartbeat(heartbeat time.Duration, stopVolumeRpc chan<- bool,
 		case <-time.After(heartbeat):
 			p.sendLeaderPings(members)
 		case <-p.oldTerm:
-			log.Printf("REGISTERED NEW TERM OF: %d", p.peers.GetTerm())
+			p.roleLog(fmt.Sprintf("REGISTERED NEW TERM OF: %d", p.peers.GetTerm()))
 			stopVolumeRpc<-true 
 			return
 		case <-stopHeartbeat:
-			log.Println("HEARBEAT - RECIEVED STOP FROM LEAVING LEADER STATE")		
+			p.roleLog("HEARBEAT - RECIEVED STOP FROM LEAVING LEADER STATE")
 			return
 	}
 	}
@@ -420,15 +443,16 @@ func (p *PoC) checkTerm(newTerm int, leaderAddr string) bool{
 	if newTerm > p.peers.GetTerm(){
 		p.peers.BecomeMember(newTerm)
 		p.peers.MakeLeader(leaderAddr)
+		p.proxyLeader <- leaderAddr
 		p.roleLog("NEW TERM: "+strconv.Itoa(newTerm)+" AND LEADER: "+ leaderAddr)
 		p.oldTerm <- newTerm
+
 		return true 
 	}
 	return false
 }
 
 
-//
 func (p *PoC) sendLeaderPings(peers []string){
 	leaderAddr := p.peers.GetAddr()
 	candidateAddr, err := p.peers.GetCandidateAddress()
@@ -563,7 +587,6 @@ func (p *PoC) sendCandidatePrepareVolumeTransfer(targetIp string,filePaths []str
 				p.roleLog("ABORTING TRANSMISSION")
 				done<-false
 			}
-
 		}
 		done<-true
 
@@ -571,8 +594,12 @@ func (p *PoC) sendCandidatePrepareVolumeTransfer(targetIp string,filePaths []str
 	return done
 }
 
+// Ok will simply controll start/stop for cluster.
 func (p *PoC) StartPoc(){
-	go p.net.Listen()
+	log.Panic("WIP - ETCD CLUSTER RESTORATION PLAN TO COMPLICATED")
+	go p.net.Listen() // NOTE: UNCOMNET 
+	go p.proxy.Start()
+	//go p.kube.Start() <- should only start uppon leader election.
 	go func(){time.Sleep(time.Second); p.startModifiedRAFT()}()
 	t := 0
 	for{
@@ -583,7 +610,6 @@ func (p *PoC) StartPoc(){
 			t+=1	
 			fmt.Println(t,"(S) PASSED IN MAIN POC")
 		}
-
 	}
 }
 

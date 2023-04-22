@@ -109,7 +109,7 @@ func (p *Proxy) requestLeaderProxyPorts() chan ProxyPorts{
 	go func(){
 		for{
 		        time.Sleep(time.Second*TIME_SEC_QUERY_SVC_PORTS)
-			if ldr:= p.getLeader(); !p.isLeader(){
+			if ldr:= p.getLeader(); !p.isLeader() && ldr != ""{
 				log.Println("REQUESTING SERVICES FROM LEADER")
 				conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{IP:net.ParseIP(ldr), Port: PROXY_PORT})
 				buffer := make([]byte, 2048)
