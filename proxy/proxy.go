@@ -3,8 +3,6 @@ package proxy
 import (
 	"fmt"
 	"log"
-	"bytes"
-	"encoding/gob"
 	"math/rand"
 	"net"
 	"strconv"
@@ -12,167 +10,121 @@ import (
 	"time"
 )
 
-// TODO: Rename to ip or address accross all files.
-// TODO: Refactor variable race conditions. Separate to leader mut, and then have interface shared resource which includes, equals, write, read. And do that for each single shared variable.
-// GetActiveNodes from leader - for loadbalancing.
-// GetActiveLeader - If self -> simply process request to nodes // else forward to leader proxy.
-// GetActivePorts - basically used to get the accessible ports, start to listen on each of the accessible ports.
 
-// 1. Forward request to leader, if in failover mode, still forward to leader as candidate will assume leader upon active k8 deployment.
-// 1. cont, if leader fails -> then backup forward to candidate no matter what.
-// 1. cont, if leader, simply forward to kubernetes endpoints.
-// 2. Get service ports and start to listen on those ports. (for incoming requests to k8 cluster.).
-// 3. If leader, get the different node ips that are active on the kbuernetes cluster and proxy to one of them.
-// Basically this proxy will act as the entrypoint / increased security & service discovery etc.
-const(
-	// TODO, change port placement of all different services to some local config file.
-	PROXY_PORT=9996
-	TIME_SEC_QUERY_SVC_PORTS=10
-)
-
-
-// External ingress for cluster.
 type Proxy struct{
 	addr string
-	leaderAddr string
-	leaderChan <-chan string 
-	leaderMut sync.Mutex
-	registerPorts <-chan []int // Register new port from kubernetes cluster. Same channels used for deleting channels.
-	registerNodes <-chan []string // Register kubernetes nodes.
-	activePorts map[ProxyPort]*net.TCPListener
+	port int
+	peerNodes []string 
+	peerNodesCh <-chan []string
+	clusterPorts <-chan []int 
+	clusterNodes <-chan []string 
+	activeClusterPorts map[int]*net.TCPListener
+	activeClusterNodes []string
 	portsMut sync.Mutex
-	activeNodes []string
+	nodesMut sync.Mutex
+	stats ProxyData
+}
+
+type ProxyData struct{
+	proxiedRequests int // A proxied request is the same as local cluster failure. 
+        proxiedRequestsMut sync.Mutex
+	proxiedFailedRequests int
+	proxiedFailedRequestsMut sync.Mutex
+	proxiedSuccesfullRequests int
+        proxiedSuccesfullRequestsMut sync.Mutex
 }
 
 
+func InitProxyData() *ProxyData{
+	return &ProxyData{ proxiedRequests: 0,
+		proxiedRequestsMut: sync.Mutex{},
+		proxiedFailedRequests: 0,
+		proxiedFailedRequestsMut: sync.Mutex{},
+		proxiedSuccesfullRequests: 0,
+		proxiedSuccesfullRequestsMut: sync.Mutex{},
+	}
 
-func InitProxy(activeLeader <-chan string, fromKubeIP <-chan []string, fromKubePort <-chan []int, ip string) *Proxy{
-	return &Proxy{leaderChan: activeLeader, 
-		leaderAddr: "", 
-		registerPorts: fromKubePort, 
-		activePorts: make(map[ProxyPort](*net.TCPListener)),
+}
+
+
+func (p *ProxyData) GetStats() (int, int, int){
+	p.proxiedRequestsMut.Lock()
+	p.proxiedFailedRequestsMut.Lock()
+	p.proxiedSuccesfullRequestsMut.Lock()
+	a,b,c := p.proxiedRequests, p.proxiedFailedRequests, p.proxiedSuccesfullRequests
+	p.proxiedSuccesfullRequestsMut.Unlock()
+	p.proxiedFailedRequestsMut.Unlock()
+	p.proxiedRequestsMut.Unlock()
+	return a,b,c
+}
+
+
+func (p *ProxyData) addStatProxyReq(){
+	p.proxiedRequestsMut.Lock()
+	defer p.proxiedRequestsMut.Unlock()
+	p.proxiedRequests++
+}
+
+func (p *ProxyData) addStatFailedProxyReq(){
+	p.proxiedFailedRequestsMut.Lock()
+	defer p.proxiedFailedRequestsMut.Unlock()
+	p.proxiedFailedRequests++
+}
+
+
+func (p *ProxyData) addStatSuccesfullProxyReq(){
+	p.proxiedSuccesfullRequestsMut.Lock()
+	defer p.proxiedSuccesfullRequestsMut.Unlock()
+	p.proxiedSuccesfullRequests++
+}
+
+
+// Test proxy to cluster, should work - kinda..
+func InitProxy(ip string, port int, clusterNodes <-chan []string, clusterPorts <-chan []int, peerCh <-chan []string) *Proxy{
+	return &Proxy{
 		addr: ip,
-		registerNodes: fromKubeIP,
-		activeNodes: []string{},
+		port: port,
+		peerNodes: []string{},
+		peerNodesCh: peerCh, 
+		clusterNodes: clusterNodes,
+		clusterPorts: clusterPorts, 
+		activeClusterPorts: make(map[int](*net.TCPListener)),
+		activeClusterNodes: []string{},
 		portsMut: sync.Mutex{},
-		leaderMut : sync.Mutex{},
 	}
 }
 
-
-
-func (p *Proxy) isLeader() bool{
-	p.leaderMut.Lock()
-	defer p.leaderMut.Unlock()
-	return p.addr == p.leaderAddr
-}
-
-func (p *Proxy) getLeader() string{
-	p.leaderMut.Lock()
-	defer p.leaderMut.Unlock()
-	return p.leaderAddr 
-}
 
 func (p *Proxy) Start(){
-	log.Println("Starting proxy for: ", p.addr)
-	fromProxyLeaderPorts := p.requestLeaderProxyPorts()
+	p.peerNodes = <-p.peerNodesCh
+        p.logProxy("LISTENING ON",p.addr, fmt.Sprint(p.port))
+	go p.listenProxies()
 	for{
 		select{
-		case prts := <-fromProxyLeaderPorts:
-			// If not leader, meaning we got valid service port update.
-			log.Println("RECIEVED PORTS FROM LEADER PROXY")
-			if !p.isLeader() {p.checkNewPorts(prts)}
-		case prts := <-p.registerPorts:
-			log.Println("RECIEVED PORTS FROM LOCAL KUBE CLUSTER", prts)
-			if p.isLeader() {
-				refactor := make([]ProxyPort, len(prts))
-				for _, prt  := range prts{
-					if prt != 0{
-						refactor = append(refactor, ProxyPort(prt))
-					}
-				}
-				p.checkNewPorts(refactor)
-			}
-		case newLeader := <-p.leaderChan:
-			p.leaderMut.Lock()
-			p.leaderAddr = newLeader
-			p.leaderMut.Unlock()
-		case p.activeNodes = <-p.registerNodes:
-			log.Println("RECIEVED NEW NODE ENDPOINTS FROM LOCAL CLUSTER:", p.activeNodes)
+		case prts := <-p.clusterPorts:
+			p.logProxy("RECIEVED CLUSTER PORTS", fmt.Sprint(prts))
+			p.checkNewPorts(prts)
+		case nodes := <-p.clusterNodes:
+			p.logProxy("RECIEVED CLUSTER NODES", fmt.Sprint(nodes))
+			p.nodesMut.Lock()
+			p.activeClusterNodes = nodes
+			p.nodesMut.Unlock()
+		case newPeers := <-p.peerNodesCh:
+			p.logProxy("RECIEVED NEW PROXY PEERS", fmt.Sprint(newPeers))
+			p.peerNodes = newPeers
 		}
 	}
 }
 
-// Handles service discovery for proxying peers requesting current leader (detemrined by Modified RAFT in PoC)
-func (p *Proxy) requestLeaderProxyPorts() chan ProxyPorts{ 
-	proxyLeaderPorts := make(chan ProxyPorts) 
-	go func(){
-		for{
-		        time.Sleep(time.Second*TIME_SEC_QUERY_SVC_PORTS)
-			if ldr:= p.getLeader(); !p.isLeader() && ldr != ""{
-				log.Println("REQUESTING SERVICES FROM LEADER")
-				conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{IP:net.ParseIP(ldr), Port: PROXY_PORT})
-				buffer := make([]byte, 2048)
-				n, err := conn.Read(buffer)
-				if err != nil{
-					log.Println("FAILED TO QUERY LEADER FOR SVC PORTS.")
-				}
-				buffer = buffer[:n]
-				log.Println("TRYING TO DECODE BUFFER:")
-				pp, err := decodeProxyPorts(buffer)
-				if err != nil{
-					log.Println("FAILED TO DECODE THE PROXY PORTS")
-				}
-				log.Println("RECIEVED THE FOLLOWING PORTS FROM LEADER:", pp)
-				proxyLeaderPorts<-pp
-			}
-		}
-	}()
-	go func(){
-		proxySocket, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(p.addr),Port: PROXY_PORT})
-		defer proxySocket.Close()
-		if err != nil {
-			log.Panic("FAILED TO INITIALIZE PROXY ON PORT:", PROXY_PORT, err.Error())
-		}
-		for {
-			conn, err := proxySocket.Accept()
-			if err != nil {
-				log.Println("FAILED TO READ ON PROXY_SOCKET:", err)
-			}
-			svcPorts := p.getServicePorts()
-			go func(){
-				// Make sure connection closes. 
-				defer conn.Close()
-			        data, err := svcPorts.encode()
-				if err != nil{
-					log.Println("FAILED TO ENCODE:", svcPorts)
-				}
-			        _, err = conn.Write(data)
-			        if err != nil {
-				    log.Println("FAILED TO RETURN SVC PORTS")
-			        }
-			}()
-		}
-	}()
-	return proxyLeaderPorts
-}
 
-func (p *Proxy) getServicePorts() ProxyPorts{
-	ports := make(ProxyPorts, len(p.activePorts))
-	for port, _ := range p.activePorts{
-		ports = append(ports, ProxyPort(port))
-	}
-	return ports
-}
-
-func (p *Proxy) checkNewPorts(prts ProxyPorts){
+func (p *Proxy) checkNewPorts(prts []int){
 	for _, port := range prts{
 		if port == 0 {continue}
 		p.portsMut.Lock()
-		_, exist := p.activePorts[port]
+		_, exist := p.activeClusterPorts[port]
 		p.portsMut.Unlock()
 		if exist{
-			log.Println(p.addr, "PORT ALREADY EXIST AND RUNNING:", port)
+			p.logProxy("PORT ALREADY EXIST AND RUNNING", fmt.Sprint(port))
 		}else{
 			go p.listenPort(port)
 		}
@@ -180,16 +132,16 @@ func (p *Proxy) checkNewPorts(prts ProxyPorts){
 
 	p.portsMut.Lock()
 	defer p.portsMut.Unlock() 
-	for ip, ss := range p.activePorts{
+	for ip, ss := range p.activeClusterPorts{
 		if (!exist(ip, prts)){
-			log.Println(p.addr,": REMOVING SOCKET:", ip)
+			p.logProxy(fmt.Sprintf("%s REMOVING SOCKET [%d]", p.addr, ip))
 			ss.Close()
-			delete(p.activePorts, ip)
+			delete(p.activeClusterPorts, ip)
 		}
 	}
 }
 
-func exist(a ProxyPort, b ProxyPorts) bool{
+func exist(a int, b []int) bool{
 	for _, c := range b{
 		if a == c {
 			return true
@@ -198,105 +150,130 @@ func exist(a ProxyPort, b ProxyPorts) bool{
 	return false
 }
 
+func (p *Proxy) listenProxies(){
+	ss, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(p.addr), Port:p.port})	
+	if err != nil{
+		log.Panic("FAILED TO LISTEN ON PORT", p.port)
+	}
+	p.logProxy("STARTING PROXIE ")
+	for {
+		s, err := ss.Accept()
+		if err != nil{
+			log.Println("Failed to read inc request:", err)
+			return
+		}
+		go func(){
+			//p.stats.addStatProxyReq()
+			pp, err := ReadProxyPacket(s)
+			if err != nil{
+				log.Println("FAILED TO READ PROXY PACKET FROM CALLER", s.LocalAddr())
+				return
+			}
+			err, resp := p.forwardToCluster(pp.Data, pp.Port)
+			if err != nil{
+				p.logProxy("INC PEER PROXY REQUEST FAILED - RETURNING FAILURE TO PEER PROXY")
+				//p.stats.addStatFailedProxyReq()
+				err = WriteProxyPacket(s, ProxyPacket{Failed: true, Port: pp.Port})
+			}else{
+				p.logProxy("INC PEER PROXY REQUEST SUCCESS - RETURNING DATA TO PEER PROXY")
+				//p.stats.addStatSuccesfullProxyReq()
+				err = WriteProxyPacket(s, ProxyPacket{Failed: false, Data: resp, Port: pp.Port})
 
+			}
+		}()
+	}
+}
 
-func (p *Proxy) listenPort(port ProxyPort){
+func (p *Proxy) listenPort(port int){
 	p.portsMut.Lock()
 	ss, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(p.addr), Port:int(port)})
 	// Add server socket to object dict, if close simply close.
 	if err != nil{
-		log.Println("FAILED TO LISTEN ON PORT",port)
+		p.logProxy(fmt.Sprintf("FAILED TO LISTEN AT PORT [%d]", port))
 	        p.portsMut.Unlock()
 		return
 	}
-	p.activePorts[port] = ss
+	p.activeClusterPorts[port] = ss
 	p.portsMut.Unlock()
-	log.Println(fmt.Sprintf("REGISTERED NEW PORT [%d]",port))
+	p.logProxy(fmt.Sprintf("REGISTERED NEW PORT [%d]", port))
 	for {
 		s, err := ss.Accept()
 		if err != nil{
 			closedConn, ok := err.(*net.OpError)
 			if ok && closedConn.Err.Error() == "use of closed network connection"{
-				log.Println("SUCCESFULLY CLOSED PORT:", port)
+				p.logProxy(fmt.Sprintf("SUCCESFULLY CLOSED PORT: [%d]", port))
 			}else{
-				log.Printf("FAILED TO READ SOCKET %s", err)
+				p.logProxy(fmt.Sprintf("FAILED TO READ SOCKET FROM [%s]", s.LocalAddr().String()))
 			}
 			return
 		}
-		go p.forwardToLeader(s, port)
+		go func(clusterPort int){
+			defer s.Close()
+			buffer := make([]byte, 2048)
+			n, err := s.Read(buffer)
+			if err != nil{
+				p.logProxy(fmt.Sprintf("FAILED TO READ INC REQUEST ON PORT [%d]", clusterPort))
+				return 
+			}
+			payload := buffer[:n]
+			err, resp := p.forwardToCluster(payload, clusterPort)
+			if err == nil{
+				// Local cluster request success.
+				_, err = s.Write(resp)
+				if err != nil{
+					p.logProxy(fmt.Sprintf("FAILED TO RESPOND TO SUCCESFULL KUB CLUSTER REQUEST ON PORT [%d] - MSG:\n[%s]", clusterPort, payload))
+				}else{
+				        p.logProxy(fmt.Sprintf("SUCCESFULLY COMPLETED PROXY REQUEST ON PORT [%d]", clusterPort))
+				}
+				return 
+			}
+			// Err from local cluster, proxy 
+			err, resp = p.proxyRequest(payload, clusterPort)
+			if err != nil{
+				p.logProxy(fmt.Sprintf("FAILED TO PROXY REQUEST TO LOCAL CLUSTER [%s]", err))
+				s.Write([]byte("FAILED PROXY REQUEST"))
+				return 
+			}
+			p.logProxy(fmt.Sprintf("PROXY SUCCESS ON [%d]", clusterPort))
+			_, err = s.Write(resp)
+			if err != nil{
+				p.logProxy("FAILED TO RESPOND TO SUCCESSFULL PROXY REQUEST - REASON:", err.Error())
+			}
+		}(int(port))
 	}
 }
 
-// ProxyRequest {From: net.Conn, targetPort: ProxyPort}
-func (p *Proxy) forwardToLeader(inc net.Conn, port ProxyPort){
-	defer inc.Close()
-	ldr := p.getLeader()
-	from := inc.LocalAddr().String()
-	if p.isLeader(){
-		self := ldr
-		p.logProxy(from, self)
-		buffer := make([]byte, 2048)
-		n, err := inc.Read(buffer)
-		if err != nil{
-			log.Println("Failed to read from INC TO CLUSTER")
-			return
-		}
-		p.logProxy(self,  "CLUSTER")
-		err, resp := p.forwardToCluster(buffer[:n], int(port))
-		if err != nil{
-			log.Println("FAILED TO GET RESPONSE FROM CLUSTER. ",err)
-			return
-		}
-		p.logProxy(self, from)
-		_, err = inc.Write(resp)
-		if err != nil{
-			log.Println("FAILED TO WRITE TO CONNECTION, REASON:", err)
-		}
-		return
-	}else{
-		// Rename to ldr, self, from.
-		self := p.addr; 
-		leaderConn, err := net.DialTCP("tcp", nil, &net.TCPAddr{IP:net.ParseIP(ldr),Port: int(port)})
-		
-		if err != nil{
-			// TODO Insert retries. 
-			p.logProxy(self,  from)
-			inc.Write([]byte("ERROR WRITING TO LEADER."))
-			return
-		}
-		// TODO: Insert some error handling. 
-		buffer := make([]byte, 2048)
-		p.logProxy(from, self)
-		n, err := inc.Read(buffer)
-		if err != nil{
-			log.Println("FAILED TO READ FROM CONN", err)
-		} 
-		// TODO: Make some L7 filtering. 
-		p.logProxy(self,ldr+":"+strconv.Itoa(int(port)))
-		_, err = leaderConn.Write(buffer[:n])
-		if err != nil{
-			log.Println("FAILED TO  WRITE TO LEADER", err)
-		} 
-		// Await response.
-		p.logProxy(p.leaderAddr+":"+strconv.Itoa(int(port)), self)
-		n, err = leaderConn.Read(buffer)
-		if err != nil{
-			log.Println("FAILED TO READ FROM LEADER", err)
-		} 
-		// Return response to caller.
-		p.logProxy(self, from)
-		_, err = inc.Write(buffer[:n])
-		if err != nil{
-			log.Println("FAILED TO WRITE FROM PROXY CALLER", err)
-		} 
+func (p *Proxy) proxyRequest(data []byte, clusterPort int) (error, []byte){
+	// Try own cluster, else forward on PROXY_PORT.
+	log.Println("TAKING FIRST PEER TO PROXY. <--TODO REPLACE TO PICK RANODM PER.->")
+	peer := p.peerNodes[0]
+	log.Println("PROXY REQUEST TO PEER AT ADDRESS:", peer)
+	s, err := net.DialTCP("tcp",nil,&net.TCPAddr{IP:net.ParseIP(peer), Port: p.port})
+	if err != nil{
+		return err, data
 	}
+	p.stats.addStatProxyReq()
+	err = WriteProxyPacket(s, ProxyPacket{Data:data, Port: clusterPort})
+	if err != nil{
+		p.stats.addStatFailedProxyReq()
+		return fmt.Errorf("Failed to write packet to proxy"+err.Error()), []byte{}
+	}
+	pp, err := ReadProxyPacket(s)
+	if pp.Failed || err != nil {
+		p.stats.addStatFailedProxyReq()
+		return fmt.Errorf("Failed to proxy packet"), []byte{}
+	}
+	p.stats.addStatSuccesfullProxyReq()
+	return nil, pp.Data
 }
 
-
-// Will pick one of the kubeNodes and randomly forward to that node.
+// loadbalance nodeport service on local cluster. 
 func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){ 
 	p.logProxy(p.addr+":"+strconv.Itoa(kubePort), "TODO_SELECT_KUBE_NODE"+":"+strconv.Itoa(kubePort))
-	nodes := p.activeNodes
+	p.nodesMut.Lock()
+	nodes := make([]string, len(p.activeClusterNodes))
+	copy(nodes, p.activeClusterNodes)
+	p.nodesMut.Unlock()
 
 	// TODO: Decide on loadbalancing strategy /retries etc.
 	// For now just random load balancing. 
@@ -329,51 +306,22 @@ func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){
 		}(kubResp)
 		select{
 		case <-time.After(time.Second*2):
-		log.Println("NODE FAILURE: "+node)
+			log.Println("NODE FAILURE, TRY ANOTHER KUBE NODE - closing prev channel. -- "+node)
+			close(kubResp)
 		case resp := <- kubResp:
-		log.Println("GOT RESPONSE FROM NODE:", string(resp))
-		return nil, resp
+			log.Println("GOT RESPONSE FROM NODE:", string(resp))
+			return nil, resp
 		}
 	}
 	return fmt.Errorf("FAILED TO REACH ANY OF THE KUB NODES."),[]byte{}
 }
 
-type ProxyPorts []ProxyPort
-type ProxyPort int
-
-func (p *ProxyPorts) encode() ([]byte, error){
-	var buffer bytes.Buffer
-	enc := gob.NewEncoder(&buffer);
-	err := enc.Encode(p)
-	if err != nil{
-		log.Printf("ENCODE ERROR: %s",err)
-		return nil, nil
-	}
-	byteBuff := make([]byte, 2048)
-	n, _ := buffer.Read(byteBuff);
-	return byteBuff[:n], nil
-}
-
-func decodeProxyPorts(proxyPorts []byte) (ProxyPorts, error){
-	buffer := bytes.NewBuffer(proxyPorts)
-	dec := gob.NewDecoder(buffer)
-	var packet ProxyPorts
-	err := dec.Decode(&packet);
-	if err != nil{
-		log.Printf("DECODE ERROR: %s", err)
-		return packet, err
-	}
-	return packet, nil;
-
-}
-
-func (p *Proxy) logProxy(src string, dst string){
-	if src == p.addr{
-		src = "SELF"
-	}else if dst == p.addr{
-		dst = "SELF"
-	}
-	log.Println(fmt.Sprintf("PROXY: %s -> %s", src, dst))
+func (p *Proxy) logProxy(msgs ...string){
+	conc := ""
+	for _, msg := range msgs {
+		conc+=" "+msg
+	} 
+	log.Println(fmt.Sprintf("PROXY: %s", conc))
 }
 
 

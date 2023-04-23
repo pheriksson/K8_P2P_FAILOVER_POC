@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"time"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -21,35 +19,21 @@ const (
 	NODE_NETWORK_HEALTHY_KEY = "True"
 	TIME_SEC_HEALTH_CHECK = 10
 	TIME_SEC_ANNOUNCE_SERVICES = 10
+	TIME_SEC_CHECK_CLUSTER_NODES = 20
 	ETCD_SNAPSHOT_FILENAME = "etcd_snapshot.db"
 )
 
 type KubeClient struct{
-	activeCluster bool 
-	fromPoc <-chan KubeMsg
-	toPoc chan<- KubeMsg 
+	objectChannel <-chan KubeCmd 
 	cluster *kubernetes.Clientset
 	activeNodes []string
-	announceNodes chan<-[]string
+	nodeChan chan<-[]string
 	activePorts []int
-	announcePorts chan<-[]int
+	portChan chan<-[]int
 }
 
-type KubeMsg int
 
-const(
-	START_CLUSTER KubeMsg = iota
-	STOP_CLUSTER
-	UNHEALTHY_CLUSTER
-	CONFIRM_EARLY_FAILOVER
-	PORT_ANNOUNCEMENT
-)
-
-// Need to address this stuff aswell
-type NodeAddress string
-type ServicePorts int
-
-func InitKubeClient(confPath string, nodeIpChan chan<-[]string, portChan chan<-[]int, fromPoc <-chan KubeMsg, toPoc chan<- KubeMsg) *KubeClient{
+func InitKubeClient(confPath string, nodeChan chan<-[]string, portChan chan<-[]int, newObject <-chan KubeCmd) *KubeClient{
 	config, err := clientcmd.BuildConfigFromFlags("", confPath)
 	if err != nil{
 		log.Panic("FAILED TO INIT KUB CLUSTER CLIENT, REASON:", err)
@@ -59,12 +43,10 @@ func InitKubeClient(confPath string, nodeIpChan chan<-[]string, portChan chan<-[
 		log.Panic("FAILED TO INITATE KUB CLUSTER CLIENT. REASON:", err)
 	}
 	return &KubeClient{
-		activeCluster: false,
-		announceNodes: nodeIpChan,
-		announcePorts: portChan,
+		nodeChan: nodeChan,
+		portChan: portChan,
 		cluster: cluster,
-		fromPoc: fromPoc,
-		toPoc: toPoc,
+		objectChannel: newObject,
 	};
 }
 
@@ -130,7 +112,6 @@ func (k *KubeClient) checkNodeStatus(health chan  bool){
 		health<- false
 		return
 	}
-
 	confirmedHealthy := 0
 	for _, node := range nodes.Items{
 		for _, cond := range node.Status.Conditions{
@@ -147,107 +128,65 @@ func (k *KubeClient) checkNodeStatus(health chan  bool){
 
 func (k *KubeClient) Start(){
 	log.Println("TODO: Start cluster operations.")
-	os.Exit(0)
-	// Stop conditions -> health checks start to fail -> init early failover and wait.
-	// Or abort from poc signaling new leader enroled  (self is not leader). 
-	// TODO: Send active nodes to proxy. Can be done by all the proxies to prepare.
-	k.saveImages()
-	func(){
-	time.Sleep(time.Second*3)
-	err := k.startCluster()
-	if err != nil{
-		log.Println("FAILED TO START CLUSTER:",err)
-	}
-	}()
-	// Init proxy ports/nodes after succesfull restoration.
-	nodes, err := k.getClusterNodeAddresses()
-	if err != nil{
-		log.Panic("ERROR GETTING NODES: ",err)
-	}
-	go func(){k.announceNodes <- nodes}()
+	go k.startAnnounceClusterNodes()
+	k.announceClusterPorts()
 
-	svcPorts, err := k.getClusterNodePorts()
-	if err != nil{
-		log.Panic("ERROR GETTING NODE PORTS: ",err)
-	}
-	go func(){k.announcePorts<-svcPorts}()
-	if err != nil{
-		log.Panic("CANNOT START CLUSTER, REASON: ",err)
-	}
 	abort := make(chan bool)
+	// TODO, set cluster unhealthy for proxy to simply redirect no matter what. 
 	clusterUnhealthy := k.startHealthChecks(abort)
 	for{
 		select{
 		case <-clusterUnhealthy:
-			log.Println("RECIEVED MSG OF UNHEALTHY CLUSTER.")
-			k.toPoc<- UNHEALTHY_CLUSTER
-		// Need to organice communication from and to PoC.
-		case cmd := <-k.fromPoc:
-			log.Println("RECIEVED MSG FOR POC ", cmd)
-			k.handleMsg(cmd)
-		case <-time.After(time.Second):
-			log.Println("")
+			log.Println("<--- UNHEALTHY CLUSTER - FORWARD TO PROXY ONLY --->")
+		case update := <-k.objectChannel:
+			k.updateCluster(update)
 		case <-time.After(time.Second*TIME_SEC_ANNOUNCE_SERVICES):
-			svcPorts, err := k.getClusterNodePorts()
-			if err != nil{
-				log.Panic("ERROR GETTING NODE PORTS: ",err)
-			}
-			go func(){
-				log.Println("ANNOUNCE CURRENT SERVICES TO PROXY SENDING TO PROXY:", svcPorts)
-				k.announcePorts<-svcPorts
-			}()
-			
+			k.announceClusterPorts()
 		}
 	}
 }
 
-func (k *KubeClient) handleMsg(cmd KubeMsg){
-	switch cmd{
-	case START_CLUSTER:
-		log.Println("TODO: CALL TO START CLUSTER AND RETURN OK WHEN START CONFIRMED.")
-	case STOP_CLUSTER:
-		log.Println("TODO: INSERT CALL TO STOP CLUSTER.")
-	default:
-		log.Println("RECIEVED DEFAULT TAG FOR HANDLEM;SG:", cmd)
-         }
+func (k *KubeClient) startAnnounceClusterNodes(){
+	for{
+		nodes, err := k.getClusterNodeAddresses()
+		if err != nil{
+			log.Println("No cluster node accessible.")
+			k.nodeChan<-[]string{}
+		}else{
+			k.nodeChan<-nodes
+		}
+		time.Sleep(time.Second*TIME_SEC_CHECK_CLUSTER_NODES)
+	}
 }
-
-
-func (k *KubeClient) saveImages(){
-	script := "./kube/scripts/snapshot_etcd.sh"
-	_, err := exec.Command("/bin/bash", script).Output()
+func (k *KubeClient) announceClusterPorts() {
+	svcPorts, err := k.getClusterNodePorts()
 	if err != nil{
-		log.Panic("COULD NOT SAVE ETCD VOLUME, REASON:", err)
+		log.Panic("ERROR GETTING NODE PORTS: ",err)
+	}
+	go func(){k.portChan<-svcPorts}()
+} 
+
+
+func (k *KubeClient) updateCluster(update KubeCmd){
+	switch update.Type{
+	case CREATE_SERVICE:
+		err := CreateNodePort(k.cluster, update.ObjectService)
+		if err != nil{
+			log.Println("FAILED TO CREATE SERVICE:", err)
+			return
+		}
+		log.Println("CREATED NEW SERVICE AT PORT:", update.ObjectService.Port.NodePort)
+	        k.announceClusterPorts()
+	case CREATE_DEPLOYMENT:
+		err := CreateDeployment(k.cluster, update.ObjectDeployment)
+		if err != nil{
+			log.Println("FAILED TO CREATE DEPLOYMENT:", err)
+			return
+		}
+		log.Println("CREATED OBJECT DEPLOYMENT: ", update.ObjectDeployment.Name)
 	}
 }
 
-
-func (k *KubeClient) startCluster() error{
-	defaultSnapshotPath :="/tmp/poc/ETCD_VOLUME_BACKUP"
-	_, err :=  os.Open(defaultSnapshotPath)
-	if err != nil {
-		log.Println("NO PREVIOUSLY STORED IMAGE")
-		return nil
-	}
-
-	script := "./kube/scripts/restore_etcd.sh"
-	_, err = exec.Command("/bin/bash", script).Output()
-	if err != nil{
-		log.Panic("ERROR ON RESTORE ETCD SHELL", err)
-	}
-	log.Println("GOT CALL TO START CLUSTER.")
-	k.activeCluster = true
-	return nil
-}
-
-
-func (k *KubeClient) stopCluster(){
-	k.activeCluster = false
-	// Delete services.
-	// Delete deployments.
-	// Get confirmation from candidate (if possible) before complete stopage.
-	// Shutdown cluster. 
-}
 func (k *KubeClient) startHealthChecks(abort chan bool) chan bool{
 	clusterUnhealthy := make(chan bool)
 	go func(cu chan bool, abort chan bool){
