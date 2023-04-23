@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+const(
+// Const port number used to test cluster on local environment as nodeports
+// are accessible through all nodes in cluster. meaning solution will simply be
+// to shit the proxy port for X amount. meaning a req to nodeport X will be reachable
+// from proxy port X+LOCAL_DEV_PORT_PROXY_SHIFT, 
+	LOCAL_DEV_PORT_PROXY_SHIFT=100
+)
 
 type Proxy struct{
 	addr string
@@ -118,8 +125,11 @@ func (p *Proxy) Start(){
 
 
 func (p *Proxy) checkNewPorts(prts []int){
+	// NOTE THE USE OF PORT SKEW TO IMITATE PROXY REQUESTS AND PROXY FORWARDING.
+	// SAVING PORTS AT SKEW, AND FORWARDING TO CLUSTER AT PORT-LOCAL_DEV_PORT_PROXY_SHIFT 
 	for _, port := range prts{
 		if port == 0 {continue}
+		port = port+LOCAL_DEV_PORT_PROXY_SHIFT
 		p.portsMut.Lock()
 		_, exist := p.activeClusterPorts[port]
 		p.portsMut.Unlock()
@@ -132,11 +142,11 @@ func (p *Proxy) checkNewPorts(prts []int){
 
 	p.portsMut.Lock()
 	defer p.portsMut.Unlock() 
-	for ip, ss := range p.activeClusterPorts{
-		if (!exist(ip, prts)){
-			p.logProxy(fmt.Sprintf("%s REMOVING SOCKET [%d]", p.addr, ip))
+	for port, ss := range p.activeClusterPorts{
+		if (!exist(port-LOCAL_DEV_PORT_PROXY_SHIFT, prts)){
+			p.logProxy(fmt.Sprintf("%s REMOVING SOCKET [%d]", p.addr, port+LOCAL_DEV_PORT_PROXY_SHIFT))
 			ss.Close()
-			delete(p.activeClusterPorts, ip)
+			delete(p.activeClusterPorts, port+LOCAL_DEV_PORT_PROXY_SHIFT)
 		}
 	}
 }
@@ -195,7 +205,7 @@ func (p *Proxy) listenPort(port int){
 	}
 	p.activeClusterPorts[port] = ss
 	p.portsMut.Unlock()
-	p.logProxy(fmt.Sprintf("REGISTERED NEW PORT [%d]", port))
+	p.logProxy(fmt.Sprintf("REGISTERED NEW PORT [%s:%d]",p.addr, port))
 	for {
 		s, err := ss.Accept()
 		if err != nil{
@@ -269,6 +279,8 @@ func (p *Proxy) proxyRequest(data []byte, clusterPort int) (error, []byte){
 
 // loadbalance nodeport service on local cluster. 
 func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){ 
+	kubePort = kubePort-LOCAL_DEV_PORT_PROXY_SHIFT
+
 	p.logProxy(p.addr+":"+strconv.Itoa(kubePort), "TODO_SELECT_KUBE_NODE"+":"+strconv.Itoa(kubePort))
 	p.nodesMut.Lock()
 	nodes := make([]string, len(p.activeClusterNodes))
