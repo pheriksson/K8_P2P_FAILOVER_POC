@@ -58,7 +58,7 @@ type KubeDeployment struct{
 }
 
 func CreateDeploymentObject(metaName string, numReplicas int32, selectKey string, selectValue string, labelKey string, 
-	labelValue string,cntrName string, cntrImage string,  cntrPort int32, targetPort int32, portName string) (error, *KubeDeployment){
+	labelValue string,cntrName string, cntrImage string,  cntrPort int32,portName string) (error, *KubeDeployment){
 	obj := KubeDeployment{
 		Name: metaName,
 		Replicas: numReplicas,
@@ -74,6 +74,7 @@ func CreateDeploymentObject(metaName string, numReplicas int32, selectKey string
 			Ports: KubePort{
 				Name: portName,
 				ContainerPort: cntrPort,
+				
 			},
 		},
 	}
@@ -160,9 +161,9 @@ func CreateDeployment(clstr *kubernetes.Clientset, object KubeDeployment) error{
 							Image: object.Image.ImageName,
 							Ports: []apiv1.ContainerPort{
 								{
-									Name:          object.Ports.Name,
+									Name:          object.Image.Ports.Name,
 									Protocol:      apiv1.ProtocolTCP,
-									ContainerPort: object.Ports.ContainerPort,
+									ContainerPort: object.Image.Ports.ContainerPort,
 								},
 							},
 						},
