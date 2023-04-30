@@ -12,7 +12,8 @@ import (
 
 type KubeMsg int 
 const(
-	CREATE_SERVICE KubeMsg = iota
+	NIL KubeMsg = iota
+	CREATE_SERVICE
 	DELETE_SERVICE
 	CREATE_DEPLOYMENT
 	DELETE_DEPLOYMENT
@@ -23,6 +24,7 @@ type KubeCmd struct{
 	ObjectDeployment KubeDeployment 
 	ObjectService	KubeNodePort
 }
+
 
 type KubeNodePort struct{
 	Name string
