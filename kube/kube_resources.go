@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"fmt"
+
 	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,10 +20,43 @@ const(
 	DELETE_DEPLOYMENT
 )
 
+func (m *KubeMsg) toString() string{
+	switch *m{
+	case CREATE_SERVICE:
+		return "CREATE SERVICE"
+	case DELETE_SERVICE:
+		return "DELETE SERVICE"
+	case CREATE_DEPLOYMENT:
+		return "CREATE DEPLOYMENT"
+	case DELETE_DEPLOYMENT:
+		return "DELETE DEPLOYMENT"
+	default:
+		return "UNKNOWN TYPE"
+	}
+}
+
 type KubeCmd struct{
 	Type KubeMsg
 	ObjectDeployment KubeDeployment 
 	ObjectService	KubeNodePort
+}
+
+func (kc *KubeCmd) ToString() string{
+	switch kc.Type{
+	case CREATE_SERVICE, DELETE_SERVICE:
+		return "ACTION: "+kc.Type.toString()+" RESOURCE: "+kc.ObjectService.toString()
+	case CREATE_DEPLOYMENT, DELETE_DEPLOYMENT:
+		return "ACTION: "+kc.Type.toString()+" RESOURCE: "+kc.ObjectDeployment.toString()
+	}
+	return "UNKNOWN COMMAND"	
+}
+
+func (knp *KubeNodePort) toString() string{
+	return fmt.Sprintf("NodePort: ID: [%s], Selector: [%s], ExposedPort [%d]", knp.Name, knp.Selector, int(knp.Port.TargetPort))
+}
+
+func (kd *KubeDeployment) toString() string{
+	return fmt.Sprintf("Deployment: ID: [%s], Image: [%s], Replicas: [%d], Labels: [%v]", kd.Name, kd.Image.Name, kd.Replicas, kd.Labels)
 }
 
 

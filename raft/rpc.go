@@ -1,46 +1,43 @@
-package poc
+package raft
 
 import(
 	"encoding/gob"
 	"bytes"
+	"github.com/pheriksson/K8_P2P_FAILOVER_POC/kube"
 	"log"
 )
 
-// TODO: Data transfer from candidate to members.
-// -> When candidate recieves volume, simply send to rest of members. 
-type VoteLeader struct{
+type RequestVote struct{
 	Term int
-	LeaderAddr string
+	CandidateAddr string 
+	LogIndex int
 	Agreed bool
 }
-// Used as candidate confirmation of leader and candidate 
-type VoteCandidate struct{
+
+type AppendEntry struct {
 	Term int
 	LeaderAddr string
-	CandidateAddr string
-	Agreed bool	
+	LogIndex int 
+	NewObject kube.KubeCmd 
+	Confirmed bool
 }
-// Used as ping by leader to all - discovery of member to candidate.
-// And to be used by candidate to notify of leader health deteriating. 
-type Health struct{
+
+type FetchMissingEntries struct{
 	Term int
 	LeaderAddr string
-	CandidateAddr string
-	Stable	bool
+	LogIndex int
+	NewObject kube.KubeCmd 
 }
-// TODO: Implement for volumes so correct volume identity can be established.  
-type PersistentVolumes struct{
+
+type AppendEntryResponse struct{
 	Term int
 	LeaderAddr string
-	CandidateAddr string
-	VolumeType string
-	VolumeId string
-	VolumeSize int64
-	Complete bool
+	LogIndex int
+	Confirmed bool 
 }
 
 type Payload interface {
-	VoteLeader | VoteCandidate | Health | PersistentVolumes
+	 RequestVote | AppendEntry | AppendEntryResponse | FetchMissingEntries
 }
 
 const (

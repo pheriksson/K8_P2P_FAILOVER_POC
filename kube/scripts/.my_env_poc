@@ -1,0 +1,24 @@
+
+# Specify user who has the kubectl config - kubectl will use config from '$HOME/.kube/config' by default (and if cluster created via suggested kubeadm).
+KUBECTL_USER=superhome
+
+# NOTE - REQUIRES ETCD INSTANCE TO BE RUN FROM POC EXECUTABLE.
+
+ETCD_ADDR=127.0.0.1
+ETCD_PORT=2379
+
+# Default location of local etcd instance volume. 
+ETCD_DATA_DIR=/var/lib/etcd
+#/member
+
+# Specified default locations. 
+ETCD_CA_CERT_LOCATION=/etc/kubernetes/pki/etcd/ca.crt
+ETCD_CERT_LOCATION=/etc/kubernetes/pki/etcd/server.crt
+ETCD_KEY_LOCATION=/etc/kubernetes/pki/etcd/server.key
+
+# Where to store the etcd snapshot.
+ETCD_SNAPSHOT_PATH=/tmp/poc/ETCD_VOLUME_BACKUP
+
+# dirr for poc related stuff
+POC_DIR=/tmp/poc
+mkdir -p $POC_DIR

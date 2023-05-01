@@ -20,7 +20,6 @@ const (
 	TIME_SEC_HEALTH_CHECK = 10
 	TIME_SEC_ANNOUNCE_SERVICES = 10
 	TIME_SEC_CHECK_CLUSTER_NODES = 20
-	ETCD_SNAPSHOT_FILENAME = "etcd_snapshot.db"
 )
 
 type KubeClient struct{

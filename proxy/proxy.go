@@ -85,8 +85,6 @@ func (p *ProxyData) addStatSuccesfullProxyReq(){
 	p.proxiedSuccesfullRequests++
 }
 
-
-// Test proxy to cluster, should work - kinda..
 func InitProxy(ip string, port int, clusterNodes <-chan []string, clusterPorts <-chan []int, peerCh <-chan []string) *Proxy{
 	return &Proxy{
 		addr: ip,
@@ -255,7 +253,7 @@ func (p *Proxy) listenPort(port int){
 
 func (p *Proxy) proxyRequest(data []byte, clusterPort int) (error, []byte){
 	// Try own cluster, else forward on PROXY_PORT.
-	log.Println("TAKING FIRST PEER TO PROXY. <--TODO REPLACE TO PICK RANODM PER.->")
+	log.Println("TAKING FIRST PEER TO PROXY. <-- TODO REPLACE TO PICK RANODM PEER -->")
 	peer := p.peerNodes[0]
 	log.Println("PROXY REQUEST TO PEER AT ADDRESS:", peer)
 	s, err := net.DialTCP("tcp",nil,&net.TCPAddr{IP:net.ParseIP(peer), Port: p.port})
@@ -286,9 +284,6 @@ func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){
 	nodes := make([]string, len(p.activeClusterNodes))
 	copy(nodes, p.activeClusterNodes)
 	p.nodesMut.Unlock()
-
-	// TODO: Decide on loadbalancing strategy /retries etc.
-	// For now just random load balancing. 
 	for n := range nodes{
 		i := rand.Intn(n+1)
 		nodes[n],nodes[i] = nodes[i], nodes[n] 

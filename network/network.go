@@ -1,24 +1,19 @@
 package network
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"os"
 	"time"
 )
 const(
-  TIMEOUT_SEC_SEND = TIMEOUT_SEC_RECIEVE + 2
   TIMEOUT_SEC_RECIEVE = 2
+  TIMEOUT_SEC_SEND = TIMEOUT_SEC_RECIEVE + 2
 
 )
 type Network struct {
-	AddrRPC		*net.TCPAddr
-	AddrFileTransfer *net.TCPAddr
-	pocChan chan<- RPC
+	addr		*net.TCPAddr
+	pocChan		chan<- RPC
 }
 
 type RPC struct{
@@ -30,32 +25,19 @@ func (rpc *RPC) GetPacket() *Packet{
 	return &rpc.P
 }
 
-func InitNetwork(ip string, portRPC int, portFileTransfer int, ch chan<-RPC) *Network{
+func InitNetwork(ip string, portRPC int, ch chan<-RPC) *Network{
 	addrRPC := &net.TCPAddr{IP:net.ParseIP(ip), Port: portRPC};
-	addrFileStream := &net.TCPAddr{IP:net.ParseIP(ip), Port: portFileTransfer}
-	return &Network{addrRPC, addrFileStream, ch}
+	return &Network{addrRPC, ch}
 }
 
 func (n *Network) Listen(){
-	ss, err := net.ListenTCP("tcp", n.AddrRPC)
+	ss, err := net.ListenTCP("tcp", n.addr)
 	if err != nil{
-		log.Panic("CANNOT BIND TO ADDR:", n.AddrRPC)
+		log.Panic("CANNOT BIND TO ADDR:", n.addr)
 	}
 	defer ss.Close()
-	ssF, err := net.ListenTCP("tcp", n.AddrFileTransfer)
 
-	go func(){
-		for{
-		sf, err := ssF.Accept()
-		if err != nil{
-			log.Printf("FAILED TO READ SOCKET %s", err)
-		}
-		go n.handleHugeFiles(sf)
-
-		}
-	}()
-
-	log.Println("STARTING MOD RAFT ON:",n.AddrRPC)
+	log.Println("STARTING MOD RAFT ON:",n.addr)
 	for {
 		s, err := ss.Accept()
 		if err != nil{
@@ -63,50 +45,6 @@ func (n *Network) Listen(){
 		}
 		go n.handleRequest(s)
 	}
-}
-
-func (n *Network) handleHugeFiles(s net.Conn) (){
-	var fileSize int64
-	err := binary.Read(s, binary.LittleEndian, &fileSize)	
-	if err != nil{
-		log.Println("FAILED TO WRITE FILE SIZE", err)
-		return
-	}
-	store, err := os.Create(time.Stamp+"recieved_file.txt")
-	if err != nil{
-		log.Println("FAILED TO WRITE TO FILE.", err)
-		return 
-	}
-	_, err = io.CopyN(store, s, fileSize)
-	if err != nil{
-		log.Println("FAILED TO COPY BUFFER TO FILE", err)
-	}
-}
-
-func (n *Network) SendLargeFile(target *net.TCPAddr,filePath string) chan bool{
-	status := make(chan bool)
-	go func(){
-	byteStream, err := os.ReadFile(filePath)
-	if err != nil{
-		status <- false
-	}
-	size := int64(len(byteStream))
-	conn, err := net.DialTCP("tcp", nil, target)
-	if err != nil{
-		status <- false
-	}
-	err = binary.Write(conn, binary.LittleEndian, size)
-	if err != nil{
-		status <- false
-	}
-	_, err = io.CopyN(conn, bytes.NewReader(byteStream), size)
-	if err != nil{
-		status <- false
-	}
-	status <- true
-
-	}()
-	return status
 }
 
 func (n *Network) handleRequest(s net.Conn){
@@ -131,7 +69,7 @@ func (n *Network) handleRequest(s net.Conn){
 }
 
 func (n *Network) SendRequest(target *net.TCPAddr, data []byte, dt DataType) error{ 
-	packet := NewPacket(n.AddrRPC, data, dt)
+	packet := NewPacket(n.addr, data, dt)
 	encPacket, err := Encode(*packet)
 	if err != nil {
 		return fmt.Errorf("FAILED TO ENCODE PACKET ADDRESSED TO %s. ERROR: %s",target, err)                
@@ -151,9 +89,8 @@ func (n *Network) SendRequest(target *net.TCPAddr, data []byte, dt DataType) err
 	return nil 
 }
 
-// Func send request await response. 
 func (n *Network) SendRequestAwaitResponse(target *net.TCPAddr, data []byte, dt DataType) (error, chan Packet){ 
-	packet := NewPacket(n.AddrRPC, data, dt)
+	packet := NewPacket(n.addr, data, dt)
 	encPacket, err := Encode(*packet)
 	if err != nil {
 		return fmt.Errorf("FAILED TO ENCODE PACKET ADDRESSED TO %s. ERROR: %s",target, err), make(chan Packet)
@@ -180,7 +117,6 @@ func (n *Network) SendRequestAwaitResponse(target *net.TCPAddr, data []byte, dt 
 			return
 		}
 		go func(){
-			// new go func to close socket and only leave channel.
 			resp <- decPacket
 		}()
 	}()

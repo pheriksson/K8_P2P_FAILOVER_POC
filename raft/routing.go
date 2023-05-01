@@ -1,4 +1,4 @@
-package poc
+package raft
 
 import (
 	"fmt"
@@ -10,11 +10,14 @@ const (
 	TIME_RANGE_HEARTBEAT = 1
 )
 
+
 type PeerRouting struct{
 	self	*Peer
 	table	map[string]*Peer
 	active	bool
 }
+
+
 
 func InitPeerRouting(hostAddress string) *PeerRouting{
 	return &PeerRouting{InitPeer(hostAddress,"SELF"),make(map[string]*Peer), false}
@@ -155,7 +158,7 @@ func (p *PeerRouting) CheckLeaderTimeout() (bool, time.Duration, error){
 func (p *PeerRouting) UpdateTTL(addr string) (error){
 	pr, exist := p.table[addr]
 	if exist {
-		pr.ttl = time.Now().Add(time.Duration(time.Second*TTL_TIMEOUT_SECONDS))
+		pr.ttl = time.Now().Add(time.Duration(time.Second*SEC_TIME_TIMEOUT_LEADER_HB))
 		// Starting traffic - making sure no new peers can be added.
 		pr.active = true
 		return nil
@@ -214,6 +217,13 @@ func (p *PeerRouting) MakeCandidate(addr string) bool{
 
 func (p *PeerRouting) BecomeLeader(){
 	p.self.role = LEADER
+	for _, peer := range p.table{
+		peer.role = MEMBER
+	}
+}
+
+func (p *PeerRouting) WipeLeader(){
+	p.self.role = MEMBER
 	for _, peer := range p.table{
 		peer.role = MEMBER
 	}

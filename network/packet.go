@@ -7,6 +7,7 @@ import (
 	"net"
 )
 
+
 type Packet struct {
 	Caller *net.TCPAddr
 	Data   []byte
@@ -20,30 +21,11 @@ const(
 type DataType int
 
 const(
-	RAFT_VOTE_LEADER DataType = iota
-	RAFT_VOTE_CANDIDATE
-	RAFT_HEALTH	
-	RAFT_MEMBER_REQUEST_VOTE
-	RAFT_CANDIDATE_REQUEST_VOTE
-	REQUEST_PERSISTENT_VOLUMES
+	REQUEST_VOTE DataType = iota
+	APPEND_ENTRY
+	FETCH_MISSING_ENTRIES
 )
 
-func (d DataType) ToString() string{
-	switch (d){
-	case RAFT_VOTE_LEADER:
-		return "RAFT_VOTE_LEADER"
-	case RAFT_VOTE_CANDIDATE:
-		return "RAFT_VOTE_CANDIDATE"
-	case RAFT_HEALTH:
-		return "RAFT_HEALTH"
-	case RAFT_MEMBER_REQUEST_VOTE:
-		return "RAFT_MEMBER_REQUEST_VOTE"
-	default:
-		return "UNKNOWN"
-	}
-
-
-}
 // TODO: Error if packet somehow exceds limited packet size.
 func NewPacket(c *net.TCPAddr, data []byte, dt DataType) *Packet{
 	p := Packet{Caller: c, Data: data, Type: dt}

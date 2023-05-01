@@ -1,4 +1,4 @@
-package poc
+package raft
 
 import(
 	"fmt"
@@ -13,8 +13,6 @@ type Peer struct{
 	role RaftStatus
 	term int
 }
-
-// Create peer factory?
 
 const(
 	TEMPORARY_LEADER_TTL=5
@@ -96,6 +94,6 @@ func (p *Peer) ToString() string{
 		roleString = "MEMBER"
 		ttlString = "NA"
 	}
-	return fmt.Sprintf("[HOST: %s, ROLE: %s, TTL: %s]",p.host, roleString, ttlString)
+	return fmt.Sprintf(p.host,"[HOST: %s, ROLE: %s, TTL: %s]", roleString, ttlString)
 } 
 

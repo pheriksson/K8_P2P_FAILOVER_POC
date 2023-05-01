@@ -7,9 +7,6 @@ import(
 	"bytes"
 )
 
-// Need this proxy packet as otherwise i will not be able to know which request
-// came through another proxy. 
-
 const(
 	PROXY_MAX_PACKET_SIZE=1024
 )
@@ -21,7 +18,6 @@ type ProxyPacket struct{
 }
 
 
-// TODO Implement encode decode.
 func ReadProxyPacket(s net.Conn) (ProxyPacket, error){
 	buffer := make([]byte, PROXY_MAX_PACKET_SIZE)
 	_, err := s.Read(buffer)
@@ -31,7 +27,6 @@ func ReadProxyPacket(s net.Conn) (ProxyPacket, error){
 	return ProxyPacket{}, nil
 }
 
-// Encode and write to conn.
 func WriteProxyPacket(s net.Conn, pp ProxyPacket) error{
 	data, err := pp.encode()
 	if err != nil{
@@ -67,5 +62,4 @@ func decode(data []byte) (ProxyPacket, error){
 		return packet, err
 	}
 	return packet, nil;
-
 }
