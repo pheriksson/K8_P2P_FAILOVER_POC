@@ -24,7 +24,7 @@ func ReadProxyPacket(s net.Conn) (ProxyPacket, error){
 	if err != nil{
 		return ProxyPacket{}, err
 	}
-	return ProxyPacket{}, nil
+	return decode(buffer)
 }
 
 func WriteProxyPacket(s net.Conn, pp ProxyPacket) error{

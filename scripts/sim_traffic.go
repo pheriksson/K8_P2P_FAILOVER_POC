@@ -4,7 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-//	"log"
+	"log"
+	"strings"
 	"net/http"
 	"sort"
 	"sync"
@@ -17,6 +18,8 @@ type RequestStats struct{
 	RespTime time.Time
 	ElapsedTime time.Duration
 	Response string
+	Cluster string
+	Hostname string
 }
 
 func InitStatsContainer(id int) *RequestStats{
@@ -34,7 +37,6 @@ type TestData struct{
 	Requests []*RequestStats
 	TotalRequests int
 	FailedRequests int
-	FailedRequestsMut sync.Mutex
 	Cycles int
 	Hz int
 }
@@ -58,10 +60,16 @@ func (td *TestData) stopTestData(){
 	for _, reqStat := range td.Requests {
 		if reqStat.Response == ""{
 			td.FailedRequests+=1
+			continue
 		}else{
-		        reqStat.ElapsedTime = reqStat.RespTime.Sub(reqStat.SentTime) 
+			values := parseServerMsgValues(reqStat.Response)
+			reqStat.Cluster = values[0]
+			reqStat.Hostname = values[1]
 		}
+		reqStat.ElapsedTime = reqStat.RespTime.Sub(reqStat.SentTime) 
 	}
+
+
 	td.sortDataSet()
 }
 
@@ -87,9 +95,9 @@ func (td *TestData) getAllRequestsData() (string){
 	res := ""
 	for _, req := range td.Requests{
 		if req.Response != ""{
-			res+= fmt.Sprintf("[%d] starttime: [%s], recievedresp: TRUE, resptime: [%s], elapsedtime: [%d(ms)]\n", req.RequestId, req.SentTime, req.RespTime, req.ElapsedTime.Milliseconds())
+			res+= fmt.Sprintf("(%d), cluster: [%s], starttime: [%s], recievedresp: TRUE, resptime: [%s], elapsedtime: [%d(ms)]\n", req.RequestId, req.Cluster, req.SentTime, req.RespTime, req.ElapsedTime.Milliseconds())
 		}else{
-			res+= fmt.Sprintf("[%d] starttime: [%s], recievedresp: FALSE, resptime: [NA], elapsedtime: [NA]\n", req.RequestId, req.SentTime)
+			res+= fmt.Sprintf("(%d), cluster: [%s], starttime: [%s], recievedresp: FALSE, resptime: [NA], elapsedtime: [NA]\n", req.RequestId, req.Cluster, req.SentTime)
 		}
 	}
 	return res
@@ -99,9 +107,9 @@ func (td *TestData) getAllRequestsDataSlim() (string){
 	res := ""
 	for _, req := range td.Requests{
 		if req.Response != ""{
-			res+= fmt.Sprintf("[%d] recievedresp: TRUE, elapsedtime: [%d(ms)]\n", req.RequestId, req.ElapsedTime.Milliseconds())
+			res+= fmt.Sprintf("(%d) cluster: [%s], recievedresp: TRUE, elapsedtime: [%d(ms)]\n", req.RequestId, req.Cluster, req.ElapsedTime.Milliseconds())
 		}else{
-			res+= fmt.Sprintf("[%d] recievedresp: FALSE, elapsedtime: [NA]\n", req.RequestId)
+			res+= fmt.Sprintf("(%d) cluster: [%s], recievedresp: FALSE, elapsedtime: [NA]\n", req.RequestId, req.Cluster)
 		}
 	}
 	return res
@@ -144,7 +152,23 @@ func startNSTest(ip string, port string, cycles int, hz int) *TestData{
 	return stats
 }
 
+// Currently parsing 'CLUSTER_ID: %s & HOSTNAME: %s ' -> {%s,%s}
+func parseServerMsgValues(msg string) []string{
+	tuples := strings.Split(msg, "&")
+	res := []string{}
 
+	for _, tuple := range tuples{
+		//tuple = strings.TrimSpace(tuple)
+		keyValue := strings.Split(tuple, ":")
+		if len(keyValue) !=  2 {
+			log.Panic("CANNOT PARSE SERVER RESPONSE")
+		}
+		keyValue[0] = strings.TrimSpace(keyValue[0])
+		keyValue[1] = strings.TrimSpace(keyValue[1])
+		res = append(res, keyValue[1])
+	} 
+	return res 
+}
 
 func main(){
 	var ip, port string
@@ -156,9 +180,9 @@ func main(){
 	flag.Parse()
 
 	data := startNSTest(ip, port, cycles, hz)
-	_, summary := data.getSummary()
-	fmt.Println("TEST RESULTS:\n", summary)
 	//allQueries := data.getAllRequestsData()
 	allQueries := data.getAllRequestsDataSlim()
+	_, summary := data.getSummary()
+	fmt.Println("TEST RESULTS:\n", summary)
 	fmt.Println("ALL DATA:\n", allQueries)
 }

@@ -43,9 +43,6 @@ func (r *RAFT) toString() string{
 	}
 }
 
-func (r *RAFT) TestRegisterPeer(ip string, hostname string){
-	r.peers.AddPeer(ip, hostname)
-}
 
 type RAFT struct{
 
@@ -699,10 +696,10 @@ func (r *RAFT)sendEncodedReply(targetAddr string, payload []byte, dt network.Dat
 	}()
 }
 
-func (r *RAFT) StartRaft(peers ...string){
-	//for _, peer := range peers{
-	//	r.peers.AddPeer(peer, "")
-	//}
+func (r *RAFT) Start(peers []string){
+	for _, peer := range peers{
+		r.peers.AddPeer(peer, "")
+	}
 	go r.net.Listen()
 	go func(){time.Sleep(time.Second); r.startRAFT()}()
 	for{
@@ -720,8 +717,8 @@ func (r *RAFT) StartRaft(peers ...string){
 				}
 			
 			}()
-		case <-time.After(time.Second*5):
-			r.stats()
+		//case <-time.After(time.Second*5):
+		//	r.stats()
 		}
 	}
 }

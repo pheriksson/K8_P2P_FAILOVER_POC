@@ -2,7 +2,6 @@ package kube
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,7 +99,7 @@ func (k *KubeClient) checkPodStatus(health chan bool){
 			confirmedHealthy++
 		}
 	}
-	logCluster(fmt.Sprintf("Healthy pods: %d/%d",confirmedHealthy, len(pods.Items)))
+	//logCluster(fmt.Sprintf("Healthy pods: %d/%d",confirmedHealthy, len(pods.Items)))
 	if confirmedHealthy == len(pods.Items){health<- true}else{health<- false}
 }
 
@@ -121,12 +120,11 @@ func (k *KubeClient) checkNodeStatus(health chan  bool){
 			}
 		}
 	}
-	logCluster(fmt.Sprintf("Healthy nodes: %d/%d",confirmedHealthy, len(nodes.Items)))
+	//logCluster(fmt.Sprintf("Healthy nodes: %d/%d",confirmedHealthy, len(nodes.Items)))
 	if confirmedHealthy == len(nodes.Items){health<- true} else {health<- false}
 }
 
 func (k *KubeClient) Start(){
-	log.Println("TODO: Start cluster operations.")
 	go k.startAnnounceClusterNodes()
 	k.announceClusterPorts()
 
@@ -224,7 +222,7 @@ func (k *KubeClient) startHealthChecks(abort chan bool) chan bool{
 }
 
 func logCluster(msg string){
-	log.Printf("CLUSTER: %s", msg)	
+	log.Printf("[CLUSTER]: %s", msg)	
 }
 
 

@@ -20,40 +20,45 @@ const (
 type PoC struct{
 	kube		*kube.KubeClient	
 	proxy           *proxy.Proxy
-	proxyPeerCh	chan<- []string
 	cli		string
 	cliChan		<-chan	string 
 	raft *raft.RAFT
-	toRaft chan<- kube.KubeCmd
+	cliToRaft chan<- kube.KubeCmd
 }
 
 
 func InitPoC(ip string, kubeConf string) *PoC{
-	toRaft := make(chan kube.KubeCmd) 
-	r, fromRaft := raft.InitRaft(ip, RAFT_PORT, toRaft)
 
+
+	// Raft/Kube synchronization
 	clusterNodes := make(chan []string)
 	clusterPorts := make(chan []int)
-	peerNodesCh := make(chan []string)
 
-	pr := proxy.InitProxy(ip, PROXY_PORT,  clusterNodes, clusterPorts, peerNodesCh) 
+
+	cliToRaft := make(chan kube.KubeCmd) 
+	r, fromRaft := raft.InitRaft(ip, RAFT_PORT, cliToRaft)
+
+
+	pr := proxy.InitProxy(ip, PROXY_PORT,  clusterNodes, clusterPorts) 
 
 	// Sending raftRead to kubeClient, meaning any confirmed raft read will be executed by kubeclient.
 	k := kube.InitKubeClient(kubeConf, clusterNodes, clusterPorts, fromRaft) 
 
 	p := PoC{
 		raft: r,
-		toRaft: toRaft,
+		cliToRaft: cliToRaft,
 		kube: k,
 		proxy: pr,
-		proxyPeerCh: peerNodesCh,
 	}
 	return &p
 }
 
 
-func (p *PoC) StartPoc(){
-	go p.raft.StartRaft()
+func (p *PoC) StartPoc(peers []string){
+	// Peers list.
+	go p.raft.Start(peers)
+	go p.proxy.Start(peers)
+	go p.kube.Start()
 	cmdCh := p.startCli()
 	t := 0
 	for {
@@ -61,7 +66,7 @@ func (p *PoC) StartPoc(){
 		case <-time.After(time.Second):
 			t+=1	
 		case cmd := <- cmdCh:
-			p.toRaft<-cmd
+			p.cliToRaft<-cmd
 		}
 	}
 }
@@ -97,8 +102,4 @@ func (p *PoC) startCli() (chan kube.KubeCmd){
 	return cmd
 }
 
-
-func (p *PoC) TestingRegisterPeer(ip string, hostname string){
-	p.raft.TestRegisterPeer(ip, hostname)
-}
 
