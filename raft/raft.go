@@ -652,7 +652,7 @@ func (r *RAFT) stopSupport() bool{
 func (r *RAFT) sendReplyObjectCommited(replyChan chan<-[]byte, status bool){
 	leaderAddr, err := r.peers.GetLeaderAddr()
 	if err != nil{
-		r.roleLog("NO LEADER TO BE FOUND"+err.Error())
+		r.roleLog("NO LEADER TO BE FOUND, REASON: "+err.Error())
 	}
 	rpcPayload, err := encodePayload(AppendEntryResponse{
 		Term: r.getTerm(),
@@ -671,7 +671,7 @@ func (r *RAFT) sendReplyLeaderVote(replyChan chan<- []byte, status bool){
 	// Will only be sent if new leader is in greater term && has higher or same commitLog.
 	leaderAddr, err := r.peers.GetLeaderAddr() 
 	if err != nil{
-		r.roleLog("NO LEADER TO BE FOUND"+err.Error())
+		r.roleLog("NO LEADER TO BE FOUND, REASON: "+err.Error())
 	}
 	rpcPayload, err := encodePayload(RequestVote{
 		Term: r.getTerm(),

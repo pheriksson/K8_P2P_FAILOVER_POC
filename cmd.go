@@ -20,7 +20,12 @@ func main(){
 	}
 	peerIps := flag.String("peerips", "", "peer ips, seperated by comma.\nex: -peerips=127.0.0.1,127.0.0.2 ")
 	exposeIp := flag.String("ip", "", "expose poc on ip")
+
+	raftPort := flag.Int("raft", 9996, "raft port")
+	proxyPort := flag.Int("proxy", 9997, "raft port")
+
 	flag.Parse()
+
 
 	if len(*exposeIp) == 0 {
 		log.Panic("CANNOT START WITHOUT EXPOSING POC ON IP")
@@ -30,7 +35,7 @@ func main(){
 	if len(peerIpList) == 0 {
 		log.Panic("CANNOT START WITHOUT ANY PEERS")
 	}
-	poc.InitPoC(*exposeIp, clusterConfPath).StartPoc(peerIpList)
+	poc.InitPoC(*exposeIp, clusterConfPath, *raftPort, *proxyPort).StartPoc(peerIpList)
 }
 
 

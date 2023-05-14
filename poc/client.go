@@ -11,10 +11,6 @@ import (
 	"github.com/pheriksson/K8_P2P_FAILOVER_POC/raft"
 )
 
-const (
-	PROXY_PORT=9996
-	RAFT_PORT=9997
-)
 
 
 type PoC struct{
@@ -22,12 +18,12 @@ type PoC struct{
 	proxy           *proxy.Proxy
 	cli		string
 	cliChan		<-chan	string 
-	raft *raft.RAFT
-	cliToRaft chan<- kube.KubeCmd
+	raft		*raft.RAFT
+	cliToRaft	chan<- kube.KubeCmd
 }
 
 
-func InitPoC(ip string, kubeConf string) *PoC{
+func InitPoC(ip string, kubeConf string, raftPort int, proxyPort int) *PoC{
 
 
 	// Raft/Kube synchronization
@@ -36,10 +32,10 @@ func InitPoC(ip string, kubeConf string) *PoC{
 
 
 	cliToRaft := make(chan kube.KubeCmd) 
-	r, fromRaft := raft.InitRaft(ip, RAFT_PORT, cliToRaft)
+	r, fromRaft := raft.InitRaft(ip, raftPort, cliToRaft)
 
 
-	pr := proxy.InitProxy(ip, PROXY_PORT,  clusterNodes, clusterPorts) 
+	pr := proxy.InitProxy(ip, proxyPort,  clusterNodes, clusterPorts) 
 
 	// Sending raftRead to kubeClient, meaning any confirmed raft read will be executed by kubeclient.
 	k := kube.InitKubeClient(kubeConf, clusterNodes, clusterPorts, fromRaft) 
@@ -89,17 +85,48 @@ func (p *PoC) startCli() (chan kube.KubeCmd){
 			}
 			switch num{
 			case 1:
-				cmd<-kube.KubeCmd{Type: kube.CREATE_SERVICE}
+				msg := TestGenDeploymentCmd()
+				cmd<-msg
 			case 2:
-				cmd<-kube.KubeCmd{Type: kube.DELETE_SERVICE}
-			case 3:
-				cmd<-kube.KubeCmd{Type: kube.CREATE_DEPLOYMENT}
-			case 4:
-				cmd<-kube.KubeCmd{Type: kube.DELETE_DEPLOYMENT}
+				msg := TestGenNodeportCmd()
+				cmd<-msg
 			}
 		}
 	}()
 	return cmd
 }
 
+func TestGenDeploymentCmd() kube.KubeCmd{
+	err, obj := kube.CreateDeploymentObject(
+		"poc-deployment",
+		5,
+		"app",
+		"cluster-loc",
+		"app",
+		"cluster-loc",
+		"server-cluster-status",
+		"seaweed39kelp/poctesting:1.0",
+		80,
+		"http",
+	)
+	if err != nil{
+		log.Panic("Failed to create object.")
+	}
+	return kube.KubeCmd{Type: kube.CREATE_DEPLOYMENT, ObjectDeployment: *obj}
+}
+func TestGenNodeportCmd() kube.KubeCmd{
+	err, svc := kube.CreateNodePortObject(
+		"poc-node-port",
+		"",
+		80,
+		80,
+		30010,
+		"app",
+		"cluster-loc",
+	)
+	if err != nil{
+		log.Panic("Failed to create object.")
+	}
+	return kube.KubeCmd{Type: kube.CREATE_SERVICE, ObjectService: *svc}
+}
 
