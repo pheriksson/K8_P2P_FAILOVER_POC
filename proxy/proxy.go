@@ -28,61 +28,9 @@ type Proxy struct{
 	activeClusterNodes []string
 	portsMut sync.Mutex
 	nodesMut sync.Mutex
-	stats ProxyData
-}
-
-type ProxyData struct{
-	proxiedRequests int // A proxied request is the same as local cluster failure. 
-        proxiedRequestsMut sync.Mutex
-	proxiedFailedRequests int
-	proxiedFailedRequestsMut sync.Mutex
-	proxiedSuccesfullRequests int
-        proxiedSuccesfullRequestsMut sync.Mutex
 }
 
 
-func InitProxyData() *ProxyData{
-	return &ProxyData{ proxiedRequests: 0,
-		proxiedRequestsMut: sync.Mutex{},
-		proxiedFailedRequests: 0,
-		proxiedFailedRequestsMut: sync.Mutex{},
-		proxiedSuccesfullRequests: 0,
-		proxiedSuccesfullRequestsMut: sync.Mutex{},
-	}
-
-}
-
-
-func (p *ProxyData) GetStats() (int, int, int){
-	p.proxiedRequestsMut.Lock()
-	p.proxiedFailedRequestsMut.Lock()
-	p.proxiedSuccesfullRequestsMut.Lock()
-	a,b,c := p.proxiedRequests, p.proxiedFailedRequests, p.proxiedSuccesfullRequests
-	p.proxiedSuccesfullRequestsMut.Unlock()
-	p.proxiedFailedRequestsMut.Unlock()
-	p.proxiedRequestsMut.Unlock()
-	return a,b,c
-}
-
-
-func (p *ProxyData) addStatProxyReq(){
-	p.proxiedRequestsMut.Lock()
-	defer p.proxiedRequestsMut.Unlock()
-	p.proxiedRequests++
-}
-
-func (p *ProxyData) addStatFailedProxyReq(){
-	p.proxiedFailedRequestsMut.Lock()
-	defer p.proxiedFailedRequestsMut.Unlock()
-	p.proxiedFailedRequests++
-}
-
-
-func (p *ProxyData) addStatSuccesfullProxyReq(){
-	p.proxiedSuccesfullRequestsMut.Lock()
-	defer p.proxiedSuccesfullRequestsMut.Unlock()
-	p.proxiedSuccesfullRequests++
-}
 
 func InitProxy(ip string, port int, clusterNodes <-chan []string, clusterPorts <-chan []int) *Proxy{
 	return &Proxy{
@@ -107,10 +55,10 @@ func (p *Proxy) Start(peers []string){
 	for{
 		select{
 		case prts := <-p.clusterPorts:
-			p.logProxy("RECIEVED CLUSTER PORTS", fmt.Sprint(prts))
+			//p.logProxy("RECIEVED CLUSTER PORTS", fmt.Sprint(prts))
 			p.checkNewPorts(prts)
 		case nodes := <-p.clusterNodes:
-			p.logProxy("RECIEVED CLUSTER NODES", fmt.Sprint(nodes))
+			//p.logProxy("RECIEVED CLUSTER NODES", fmt.Sprint(nodes))
 			p.nodesMut.Lock()
 			p.activeClusterNodes = nodes
 			p.nodesMut.Unlock()
@@ -129,7 +77,7 @@ func (p *Proxy) checkNewPorts(prts []int){
 		_, exist := p.activeClusterPorts[port]
 		p.portsMut.Unlock()
 		if exist{
-			p.logProxy("PORT ALREADY EXIST AND RUNNING", fmt.Sprint(port))
+			//p.logProxy("PORT ALREADY EXIST AND RUNNING", fmt.Sprint(port))
 		}else{
 			go p.listenPort(port)
 		}
@@ -167,7 +115,6 @@ func (p *Proxy) listenProxies(){
 			return
 		}
 		go func(s net.Conn){
-			//p.stats.addStatProxyReq()
 			pp, err := ReadProxyPacket(s)
 			if err != nil{
 				log.Println("FAILED TO READ PROXY PACKET FROM CALLER", s.LocalAddr())
@@ -176,11 +123,9 @@ func (p *Proxy) listenProxies(){
 			err, resp := p.forwardToCluster(pp.Data, pp.Port)
 			if err != nil{
 				p.logProxy("INC PEER PROXY REQUEST FAILED - RETURNING FAILURE TO PEER PROXY")
-				//p.stats.addStatFailedProxyReq()
 				err = WriteProxyPacket(s, ProxyPacket{Failed: true, Port: pp.Port})
 			}else{
-				p.logProxy("INC PEER PROXY REQUEST SUCCESS - RETURNING DATA TO PEER PROXY")
-				//p.stats.addStatSuccesfullProxyReq()
+				//p.logProxy("INC PEER PROXY REQUEST SUCCESS - RETURNING DATA TO PEER PROXY")
 				err = WriteProxyPacket(s, ProxyPacket{Failed: false, Data: resp, Port: pp.Port})
 
 			}
@@ -205,7 +150,7 @@ func (p *Proxy) listenPort(port int){
 		if err != nil{
 			closedConn, ok := err.(*net.OpError)
 			if ok && closedConn.Err.Error() == "use of closed network connection"{
-				p.logProxy(fmt.Sprintf("SUCCESFULLY CLOSED PORT: [%d]", port))
+				//p.logProxy(fmt.Sprintf("SUCCESFULLY CLOSED PORT: [%d]", port))
 			}else{
 				p.logProxy(fmt.Sprintf("FAILED TO READ SOCKET FROM [%s]", s.LocalAddr().String()))
 			}
@@ -227,7 +172,7 @@ func (p *Proxy) listenPort(port int){
 				if err != nil{
 					p.logProxy(fmt.Sprintf("FAILED TO RESPOND TO SUCCESFULL KUB CLUSTER REQUEST ON PORT [%d] - MSG:\n[%s]", clusterPort, payload))
 				}else{
-				        p.logProxy(fmt.Sprintf("SUCCESFULLY COMPLETED PROXY REQUEST ON PORT [%d]", clusterPort))
+				        //p.logProxy(fmt.Sprintf("SUCCESFULLY COMPLETED PROXY REQUEST ON PORT [%d]", clusterPort))
 				}
 				return 
 			}
@@ -238,7 +183,7 @@ func (p *Proxy) listenPort(port int){
 				s.Write([]byte("FAILED PROXY REQUEST"))
 				return 
 			}
-			p.logProxy(fmt.Sprintf("PROXY SUCCESS ON [%d]", clusterPort))
+			//p.logProxy(fmt.Sprintf("PROXY SUCCESS ON [%d]", clusterPort))
 			_, err = s.Write(resp)
 			if err != nil{
 				p.logProxy("FAILED TO RESPOND TO SUCCESSFULL PROXY REQUEST - REASON:", err.Error())
@@ -262,23 +207,19 @@ func (p *Proxy) getRandomPeerAddr() string{
 
 func (p *Proxy) proxyRequest(data []byte, clusterPort int) (error, []byte){
 	peer := p.getRandomPeerAddr()
-	p.logProxy(fmt.Sprintf("PROXY REQUEST TO PEER [%s]", peer))
+	//p.logProxy(fmt.Sprintf("PROXY REQUEST TO PEER [%s]", peer))
 	s, err := net.DialTCP("tcp",nil,&net.TCPAddr{IP:net.ParseIP(peer), Port: p.port})
 	if err != nil{
 		return err, data
 	}
-	p.stats.addStatProxyReq()
 	err = WriteProxyPacket(s, ProxyPacket{Data:data, Port: clusterPort})
 	if err != nil{
-		p.stats.addStatFailedProxyReq()
 		return fmt.Errorf("Failed to write packet to proxy"+err.Error()), []byte{}
 	}
 	pp, err := ReadProxyPacket(s)
 	if pp.Failed || err != nil {
-		p.stats.addStatFailedProxyReq()
 		return fmt.Errorf("Failed to proxy packet"), []byte{}
 	}
-	p.stats.addStatSuccesfullProxyReq()
 	return nil, pp.Data
 }
 
@@ -295,7 +236,7 @@ func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){
 	}
 	for _, node := range nodes{
 		if node == "" {continue}
-		p.logProxy(fmt.Sprintf("CLUSTER NODE [%s:%d]", node, kubePort))
+		//p.logProxy(fmt.Sprintf("CLUSTER NODE [%s:%d]", node, kubePort))
 		kubResp := make(chan []byte)
 		failure := make(chan bool)
 	        go func(respCh chan []byte, done chan bool){
@@ -319,13 +260,15 @@ func (p *Proxy) forwardToCluster(packet []byte, kubePort int) (error, []byte){
 		}(kubResp, failure)
 		select{
 		case <-failure:
-		        p.logProxy(fmt.Sprintf("LOCATION CLUSTER NODE FAILURE"))
+		        //p.logProxy(fmt.Sprintf("LOCATION CLUSTER NODE FAILURE"))
 			close(kubResp)
+			return fmt.Errorf("FAILED TO REACH ANY OF THE KUB NODES."),[]byte{}
 		case <-time.After(time.Second*TIME_SEC_AWAIT_KUBE_CLUSTER_TIMEOUT):
-		        p.logProxy(fmt.Sprintf("LOCATION CLUSTER NODE FAILURE - TIMEOUT"))
+		        //p.logProxy(fmt.Sprintf("LOCATION CLUSTER NODE FAILURE - TIMEOUT"))
 			close(kubResp)
+			return fmt.Errorf("FAILED TO REACH ANY OF THE KUB NODES."),[]byte{}
 		case resp := <- kubResp:
-		        p.logProxy(fmt.Sprintf("RECIEVED LOCATION CLUSTER NODE RESPONSE"))
+		        //p.logProxy(fmt.Sprintf("RECIEVED LOCATION CLUSTER NODE RESPONSE"))
 			return nil, resp
 		}
 	}
