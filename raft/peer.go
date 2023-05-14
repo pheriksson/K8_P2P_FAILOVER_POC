@@ -40,11 +40,6 @@ func (p *Peer) GetTimeRemaining() time.Duration{
 	return ttlTime 
 }
 
-func (p *Peer) AssignLeader() bool{
-	p.role = LEADER	
-	p.ttl = time.Now().Add(time.Duration(time.Second*TEMPORARY_LEADER_TTL)) 
-	return true
-}
 
 func (p *Peer) IsLeader() bool{
 	return p.role == LEADER

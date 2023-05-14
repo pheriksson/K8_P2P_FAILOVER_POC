@@ -479,7 +479,7 @@ func (r *RAFT) sendLogUpdates(term int, logIndex int){
 	}
 	for _, peer := range r.peers.GetPeersAddress() {
 		if peer == "" {continue}
-		r.roleLog("SENDING PING TO:"+peer+"")
+		//r.roleLog("SENDING PING TO:"+peer+"")
 		r.sendRequestNoResponse(peer, rpcPayload, network.APPEND_ENTRY)
 	} 
 }
@@ -549,7 +549,7 @@ func (r *RAFT) handleRpc(rpc network.RPC){
 				}
 			}else{
 				if r.getLengthLog() == data.LogIndex && objectNil{ 
-					r.roleLog("RECIEVED LEADER PING")
+					//r.roleLog("RECIEVED LEADER PING")
 					return 
 				}else if r.getLengthLog() == data.LogIndex{
 					r.roleLog(fmt.Sprintf("ACCEPTING VOTE FOR NEW OBJECT, CURR INDEX [%d]", data.LogIndex))

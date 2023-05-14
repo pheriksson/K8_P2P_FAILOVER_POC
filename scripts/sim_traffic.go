@@ -115,6 +115,18 @@ func (td *TestData) getAllRequestsDataSlim() (string){
 	return res
 }
 
+func (td *TestData) getAllRequestsCompact() (string){
+	res := ""
+	for _, req := range td.Requests{
+		if req.Response != ""{
+			res+= fmt.Sprintf("[%d],[%s],[%d]\n", req.RequestId, req.Cluster, req.ElapsedTime.Milliseconds())
+		}else{
+			res+= fmt.Sprintf("[%d],[%s],[NA]\n", req.RequestId, req.Cluster)
+		}
+	}
+	return res
+}
+
 
 
 func startNSTest(ip string, port string, cycles int, hz int) *TestData{
@@ -131,7 +143,6 @@ func startNSTest(ip string, port string, cycles int, hz int) *TestData{
 			go func(waitGroup *sync.WaitGroup, reqData *RequestStats){
 				resp, err := http.Get(addr)
 				if err != nil {
-					//log.Println("FAILED RESPONSE, err:", err.Error())
 					waitGroup.Done()
 					return
 				}
@@ -140,7 +151,6 @@ func startNSTest(ip string, port string, cycles int, hz int) *TestData{
 				body, err := ioutil.ReadAll(resp.Body)
 				bodyString := string(body)
 				reqData.Response = bodyString
-				//fmt.Println("RECIEVED:", bodyString)
 				waitGroup.Done()
 			}(wg, requestContainer)
 			stats.Requests = append(stats.Requests, requestContainer)
@@ -158,7 +168,6 @@ func parseServerMsgValues(msg string) []string{
 	res := []string{}
 
 	for _, tuple := range tuples{
-		//tuple = strings.TrimSpace(tuple)
 		keyValue := strings.Split(tuple, ":")
 		if len(keyValue) !=  2 {
 			log.Panic("CANNOT PARSE SERVER RESPONSE")
@@ -174,14 +183,15 @@ func main(){
 	var ip, port string
 	var hz, cycles int
 	flag.StringVar(&ip, "ip", "", "ip address for target")
-	flag.StringVar(&port,"port", "80", "port for target - no port will default to 80")
+	flag.StringVar(&port,"port", "80", "port for target")
 	flag.IntVar(&hz, "hz", 20, "number of calls per sec (Hz)")
-	flag.IntVar(&cycles, "cycles", 4, "number iterations of num freq")
+	flag.IntVar(&cycles, "cycles", 1, "number iterations of num freq")
 	flag.Parse()
 
 	data := startNSTest(ip, port, cycles, hz)
 	//allQueries := data.getAllRequestsData()
-	allQueries := data.getAllRequestsDataSlim()
+	//allQueries := data.getAllRequestsDataSlim()
+	allQueries := data.getAllRequestsCompact()
 	_, summary := data.getSummary()
 	fmt.Println("TEST RESULTS:\n", summary)
 	fmt.Println("ALL DATA:\n", allQueries)

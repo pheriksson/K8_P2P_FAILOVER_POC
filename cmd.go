@@ -5,8 +5,10 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
-	"github.com/pheriksson/K8_P2P_FAILOVER_POC/poc"
+
 	"k8s.io/client-go/util/homedir"
+
+	"github.com/pheriksson/K8_P2P_FAILOVER_POC/poc"
 )
 
 func main(){
@@ -28,7 +30,6 @@ func main(){
 	if len(peerIpList) == 0 {
 		log.Panic("CANNOT START WITHOUT ANY PEERS")
 	}
-
 	poc.InitPoC(*exposeIp, clusterConfPath).StartPoc(peerIpList)
 }
 
